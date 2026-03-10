@@ -13,6 +13,20 @@ import './Workspace.css';
 
 export const Workspace: React.FC = () => {
   const {
+    currentSession,
+    createSession,
+    activePanes,
+    availableModels,
+    isComparing,
+    selectedPanes,
+    setComparing,
+    setSelectedPanes,
+    refreshSessionFromBackend,
+    addPane,
+    addPaneWithId,
+    setAvailableModels,
+    updatePaneMessages,
+    updatePaneStreaming
     currentSession, createSession, activePanes, availableModels,
     isComparing, selectedPanes, setComparing, setSelectedPanes,
     refreshSessionFromBackend, addPane, addPaneWithId,
@@ -89,6 +103,18 @@ export const Workspace: React.FC = () => {
     const pane = activePanes[paneId];
     if (!pane) return;
 
+    // Add user message to pane
+    const userMessage = {
+      id: `msg-${Date.now()}-user`,
+      role: 'user' as const,
+      content: message,
+      images: images,
+      timestamp: new Date()
+    };
+    updatePaneMessages(paneId, userMessage);
+
+    // Set streaming state to true to show loading indicator
+    updatePaneStreaming(paneId, true);
     updatePaneMessages(paneId, {
       id: `msg-${Date.now()}-user`, role: 'user' as const,
       content: message, images, timestamp: new Date()
@@ -100,9 +126,17 @@ export const Workspace: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: currentSession.id, message, images })
       });
+
+      if (response.ok) {
+        console.log('Message sent to', pane.modelInfo.name);
+      } else {
+        console.error('Failed to send message:', response.statusText);
+        updatePaneStreaming(paneId, false);
+      }
       if (!response.ok) console.error('Failed to send message:', response.statusText);
     } catch (error) {
       console.error('Error sending message:', error);
+      updatePaneStreaming(paneId, false);
     }
   };
 
@@ -184,6 +218,27 @@ export const Workspace: React.FC = () => {
   };
 
   const handleBroadcastToActive = async (paneIds: string[], prompt: string) => {
+    console.log(`Broadcasting to ${paneIds.length} active panes:`, paneIds);
+
+    if (!currentSession) {
+      console.error('No current session for broadcast');
+      return;
+    }
+
+    try {
+      // Add user message to selected panes first
+      paneIds.forEach((paneId, index) => {
+        const userMessage = {
+          id: `msg-${Date.now()}-${index}-user`,
+          role: 'user' as const,
+          content: prompt,
+          timestamp: new Date()
+        };
+        updatePaneMessages(paneId, userMessage);
+
+        // Use the action to set streaming for existing panes
+        updatePaneStreaming(paneId, true);
+      });
     if (!currentSession) return;
     paneIds.forEach((paneId, index) => {
       updatePaneMessages(paneId, {
@@ -192,6 +247,63 @@ export const Workspace: React.FC = () => {
       });
     });
 
+      console.log('🚀 Sending messages to existing panes via /chat endpoint');
+
+      // Send to each existing pane using the /chat/{pane_id} endpoint
+      const chatPromises = paneIds.map(async (paneId) => {
+        const pane = activePanes[paneId];
+        if (!pane) {
+          console.error(`Pane not found: ${paneId}`);
+          return;
+        }
+
+        try {
+          const response = await fetch(`${apiService['baseUrl']}/chat/${paneId}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              session_id: currentSession.id,
+              message: prompt
+            })
+          });
+
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+
+          const result = await response.json();
+          console.log(`✅ Message sent to pane ${paneId}:`, result);
+          return result;
+        } catch (error) {
+          console.error(`❌ Failed to send message to pane ${paneId}:`, error);
+
+          // Add error message to this specific pane
+          const errorMessage = {
+            id: `msg-${Date.now()}-error-${paneId}`,
+            role: 'assistant' as const,
+            content: `Error: Failed to send message. ${error instanceof Error ? error.message : 'Unknown error'}`,
+            timestamp: new Date()
+          };
+          updatePaneMessages(paneId, errorMessage);
+          updatePaneStreaming(paneId, false);
+        }
+      });
+
+      // Wait for all chat requests to complete
+      await Promise.all(chatPromises);
+      console.log('✅ All messages sent to active panes');
+
+    } catch (error) {
+      console.error('❌ Broadcast to active panes failed:', error);
+
+      // Add error messages to all panes if there was a general failure
+      paneIds.forEach((paneId, index) => {
+        const errorMessage = {
+          id: `msg-${Date.now()}-${index}-error`,
+          role: 'assistant' as const,
+          content: `Error: Failed to broadcast message. ${error instanceof Error ? error.message : 'Unknown error'}`,
     await Promise.all(paneIds.map(async (paneId) => {
       const pane = activePanes[paneId];
       if (!pane) return;
@@ -207,6 +319,11 @@ export const Workspace: React.FC = () => {
           id: `msg-${Date.now()}-error-${paneId}`, role: 'assistant' as const,
           content: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
           timestamp: new Date()
+        };
+        updatePaneMessages(paneId, errorMessage);
+        updatePaneStreaming(paneId, false);
+      });
+    }
         });
       }
     }));

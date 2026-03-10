@@ -457,34 +457,25 @@
 
 .file-preview-item {
   position: relative;
-  width: 48px;
-  height: 48px;
+  /* Removed fixed width/height to allow auto-sizing for names */
   flex-shrink: 0;
   border-radius: 6px;
   overflow: hidden;
   border: 1px solid rgba(0, 0, 0, 0.1);
+  background-color: #fce8e8;
+  /* Default background */
 }
 
+/* Replaced by inline styles in component specific to 'with name' view, 
+   but keeping base styles for compatibility if needed. */
+
 .file-thumbnail {
-  width: 100%;
-  height: 100%;
+  /* width and height handled inline or via specific class */
   object-fit: cover;
 }
 
 .remove-file-btn {
-  position: absolute;
-  top: 1px;
-  right: 1px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.6);
-  color: white;
-  border: none;
-  font-size: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  /* Adjusted for flex layout in new design */
   cursor: pointer;
   z-index: 10;
 }

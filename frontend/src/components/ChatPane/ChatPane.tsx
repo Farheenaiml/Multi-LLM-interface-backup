@@ -31,7 +31,7 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
   const [selectedMessages, setSelectedMessages] = useState<Set<string>>(new Set());
   const [isSelectionMode, setIsSelectionMode] = useState(false);
   const [inputMessage, setInputMessage] = useState('');
-  const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
+  const [selectedFiles, setSelectedFiles] = useState<{ url: string; name: string; type: string }[]>([]);
 
   // Track initial scroll to bottom on load
   const [initialScrollDone, setInitialScrollDone] = useState(false);
@@ -131,7 +131,11 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
         const reader = new FileReader();
         reader.onloadend = () => {
           if (typeof reader.result === 'string') {
-            setSelectedFiles(prev => [...prev, reader.result as string]);
+            setSelectedFiles(prev => [...prev, {
+              url: reader.result as string,
+              name: file.name,
+              type: file.type || 'application/octet-stream' // Fallback type
+            }]);
           }
         };
         reader.readAsDataURL(file);
@@ -147,7 +151,10 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
 
   const handleSendMessage = () => {
     if ((inputMessage.trim() || selectedFiles.length > 0) && onSendMessage && !pane.isStreaming) {
-      onSendMessage(pane.id, inputMessage.trim(), selectedFiles.length > 0 ? selectedFiles : undefined);
+      // Extract just the URLs for the API, as it expects string[]
+      const fileUrls = selectedFiles.map(f => f.url);
+
+      onSendMessage(pane.id, inputMessage.trim(), fileUrls.length > 0 ? fileUrls : undefined);
       setInputMessage('');
       setSelectedFiles([]);
       // Reset initial scroll done so we don't interfere with standard behavior? 
@@ -348,17 +355,14 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
           ))
         )}
 
-        {/* Streaming Indicator */}
-        {pane.isStreaming && (
-          <div className="streaming-indicator">
+        {/* Streaming/Loading Indicator - mimics GPT thinking state */}
+        {pane.isStreaming && (!pane.messages.length || !pane.messages[pane.messages.length - 1].id.startsWith('streaming-')) && (
+          <div className="message message-assistant" style={{ width: 'fit-content', alignItems: 'center', justifyContent: 'center' }}>
             <div className="streaming-dots">
               <span></span>
               <span></span>
               <span></span>
             </div>
-            <span className="streaming-text">
-              {pane.modelInfo.name} is generating response...
-            </span>
           </div>
         )}
 
@@ -375,18 +379,21 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
         {selectedFiles.length > 0 && (
           <div className="file-previews">
             {selectedFiles.map((file, index) => (
-              <div key={index} className="file-preview-item">
-                {file.startsWith('data:image') ? (
-                  <img src={file} alt={`Upload ${index + 1}`} className="file-thumbnail" />
+              <div key={index} className="file-preview-item" style={{ width: 'auto', minWidth: '120px', maxWidth: '200px', display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 8px', backgroundColor: '#f0f0f0' }}>
+                {file.type.startsWith('image/') ? (
+                  <img src={file.url} alt={file.name} className="file-thumbnail" style={{ width: '32px', height: '32px', flexShrink: 0 }} />
                 ) : (
-                  <div className="file-thumbnail" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: '#e0e0e0', fontSize: '24px', cursor: 'default' }} title={file.split(';')[0]}>
-                    📄
-                  </div>
+                  <div className="file-icon" style={{ fontSize: '20px' }}>📄</div>
                 )}
+                <div className="file-info" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                  <span className="file-name" style={{ fontSize: '12px', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={file.name}>{file.name}</span>
+                  <span className="file-type" style={{ fontSize: '10px', color: '#666' }}>{file.type.split('/')[1]?.toUpperCase() || 'FILE'}</span>
+                </div>
                 <button
                   className="remove-file-btn"
                   onClick={() => handleRemoveFile(index)}
                   title="Remove file"
+                  style={{ position: 'static', marginLeft: 'auto', background: 'transparent', color: '#666', border: 'none', fontSize: '14px' }}
                 >
                   ✕
                 </button>

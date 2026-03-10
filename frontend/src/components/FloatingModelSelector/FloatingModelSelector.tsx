@@ -18,7 +18,7 @@ export const FloatingModelSelector: React.FC<FloatingModelSelectorProps> = ({
   const [isExpanded, setIsExpanded] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
-  const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
+  const [selectedFiles, setSelectedFiles] = useState<{ url: string; name: string; type: string }[]>([]);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   // Token estimation function (rough approximation)
@@ -74,7 +74,11 @@ export const FloatingModelSelector: React.FC<FloatingModelSelectorProps> = ({
         const reader = new FileReader();
         reader.onloadend = () => {
           if (typeof reader.result === 'string') {
-            setSelectedFiles(prev => [...prev, reader.result as string]);
+            setSelectedFiles(prev => [...prev, {
+              url: reader.result as string,
+              name: file.name,
+              type: file.type || 'application/octet-stream'
+            }]);
           }
         };
         reader.readAsDataURL(file);
@@ -87,9 +91,12 @@ export const FloatingModelSelector: React.FC<FloatingModelSelectorProps> = ({
     setSelectedFiles(prev => prev.filter((_, i) => i !== index));
   };
 
+  const getFileUrls = () => selectedFiles.map(f => f.url);
+
   const handleSingleModelClick = (model: ModelInfo) => {
     if (prompt.trim()) {
-      onModelSelect(model, prompt, selectedFiles.length > 0 ? selectedFiles : undefined);
+      const fileUrls = getFileUrls();
+      onModelSelect(model, prompt, fileUrls.length > 0 ? fileUrls : undefined);
       setPrompt('');
       setSelectedFiles([]);
       setIsExpanded(false);
@@ -102,12 +109,13 @@ export const FloatingModelSelector: React.FC<FloatingModelSelectorProps> = ({
       const modelsToSend = availableModels.filter(model =>
         selectedModels.has(`${model.provider}:${model.id}`)
       );
+      const fileUrls = getFileUrls();
 
       if (onMultiModelSelect) {
-        onMultiModelSelect(modelsToSend, prompt, selectedFiles.length > 0 ? selectedFiles : undefined);
+        onMultiModelSelect(modelsToSend, prompt, fileUrls.length > 0 ? fileUrls : undefined);
       } else {
         // Fallback to individual calls
-        modelsToSend.forEach(model => onModelSelect(model, prompt, selectedFiles.length > 0 ? selectedFiles : undefined));
+        modelsToSend.forEach(model => onModelSelect(model, prompt, fileUrls.length > 0 ? fileUrls : undefined));
       }
 
       setPrompt('');
@@ -119,11 +127,12 @@ export const FloatingModelSelector: React.FC<FloatingModelSelectorProps> = ({
 
   const handleBroadcastAll = () => {
     if (prompt.trim()) {
+      const fileUrls = getFileUrls();
       if (onMultiModelSelect) {
-        onMultiModelSelect(availableModels, prompt, selectedFiles.length > 0 ? selectedFiles : undefined);
+        onMultiModelSelect(availableModels, prompt, fileUrls.length > 0 ? fileUrls : undefined);
       } else {
         // Fallback to individual calls
-        availableModels.forEach(model => onModelSelect(model, prompt, selectedFiles.length > 0 ? selectedFiles : undefined));
+        availableModels.forEach(model => onModelSelect(model, prompt, fileUrls.length > 0 ? fileUrls : undefined));
       }
 
       setPrompt('');
@@ -138,7 +147,8 @@ export const FloatingModelSelector: React.FC<FloatingModelSelectorProps> = ({
       e.preventDefault(); // Prevent form submission
       // If only one model available, use it directly
       if (availableModels.length === 1) {
-        onModelSelect(availableModels[0], prompt, selectedFiles.length > 0 ? selectedFiles : undefined);
+        const fileUrls = getFileUrls();
+        onModelSelect(availableModels[0], prompt, fileUrls.length > 0 ? fileUrls : undefined);
         setPrompt('');
         setSelectedFiles([]);
       } else {
@@ -153,20 +163,23 @@ export const FloatingModelSelector: React.FC<FloatingModelSelectorProps> = ({
         {selectedFiles.length > 0 && (
           <div className="file-previews">
             {selectedFiles.map((file, index) => (
-              <div key={index} className="file-preview-item">
-                {file.startsWith('data:image') ? (
-                  <img src={file} alt={`Upload ${index + 1}`} className="file-thumbnail" />
+              <div key={index} className="file-preview-item" style={{ width: 'auto', minWidth: '120px', maxWidth: '200px', display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 8px', backgroundColor: '#f0f0f0', borderRadius: '6px' }}>
+                {file.type.startsWith('image/') ? (
+                  <img src={file.url} alt={file.name} className="file-thumbnail" style={{ width: '32px', height: '32px', flexShrink: 0, borderRadius: '4px', objectFit: 'cover' }} />
                 ) : (
-                  <div className="file-thumbnail" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: '#e0e0e0', fontSize: '24px', cursor: 'default' }} title={file.split(';')[0]}>
-                    📄
-                  </div>
+                  <div className="file-icon" style={{ fontSize: '20px' }}>📄</div>
                 )}
+                <div className="file-info" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                  <span className="file-name" style={{ fontSize: '12px', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: '#333' }} title={file.name}>{file.name}</span>
+                  <span className="file-type" style={{ fontSize: '10px', color: '#666' }}>{file.type.split('/')[1]?.toUpperCase() || 'FILE'}</span>
+                </div>
                 <button
                   className="remove-file-btn"
                   onClick={() => handleRemoveFile(index)}
                   title="Remove file"
+                  style={{ position: 'static', marginLeft: 'auto', background: 'transparent', color: '#999', border: 'none', fontSize: '16px', cursor: 'pointer', padding: '0 4px' }}
                 >
-                  ✕
+                  ×
                 </button>
               </div>
             ))}

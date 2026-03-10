@@ -248,6 +248,7 @@ class BroadcastOrchestrator:
 
             # Execute bridge if needed
             if needs_bridge:
+                print(f"🌉 VISION BRIDGE ACTIVATED: {bridge_reason}")
                 logger.info(f"🌉 Vision Bridge Triggered: {bridge_reason}. Handing off to Gemini...")
                 
                 # Notify user of the bridge action
@@ -280,7 +281,7 @@ class BroadcastOrchestrator:
                         description = ""
                         # Stream the description (we just want the final text)
                         # Use a reliable stable model for analysis (using alias to catch available version)
-                        async for event in vision_adapter.stream(vision_messages, "gemini-flash-latest", "temp_vision_pane"):
+                        async for event in vision_adapter.stream(vision_messages, "gemini-2.5-flash", "temp_vision_pane"):
                             if event.type == "token":
                                 description += event.data.token
                             elif event.type == "final":
