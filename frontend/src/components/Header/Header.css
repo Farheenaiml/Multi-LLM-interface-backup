@@ -1,0 +1,122 @@
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 24px;
+  background-color: #2c3e50;
+  color: white;
+  border-bottom: 2px solid #34495e;
+  min-height: 60px;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.app-title {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: #ecf0f1;
+}
+
+.session-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-name {
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #bdc3c7;
+}
+
+.session-status {
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background-color: #27ae60;
+  color: white;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.metrics-toggle {
+  padding: 8px 16px;
+  border: 1px solid #7f8c8d;
+  border-radius: 6px;
+  background-color: transparent;
+  color: #ecf0f1;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: all 0.2s ease;
+}
+
+.metrics-toggle:hover {
+  background-color: #34495e;
+  border-color: #95a5a6;
+}
+
+.metrics-toggle.active {
+  background-color: #3498db;
+  border-color: #2980b9;
+  color: white;
+}
+
+/* ── Code Arena Button ── */
+.arena-btn {
+  padding: 8px 18px;
+  border: 1px solid rgba(102, 126, 234, 0.6);
+  border-radius: 6px;
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.2), rgba(118, 75, 162, 0.2));
+  color: #a5b4fc;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.arena-btn:hover {
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.4), rgba(118, 75, 162, 0.4));
+  border-color: #667eea;
+  color: #fff;
+  box-shadow: 0 0 12px rgba(102, 126, 234, 0.3);
+  transform: translateY(-1px);
+}
+
+.arena-btn:active {
+  transform: translateY(0);
+}
+
+.session-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.session-btn {
+  padding: 8px 12px;
+  border: 1px solid #7f8c8d;
+  border-radius: 4px;
+  background-color: transparent;
+  color: #ecf0f1;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: all 0.2s ease;
+}
+
+.session-btn:hover {
+  background-color: #34495e;
+  border-color: #95a5a6;
+}

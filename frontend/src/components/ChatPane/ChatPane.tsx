@@ -262,7 +262,7 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
       <div className="pane-header">
         <div className="model-info">
           <h4 className="model-name">
-            {pane.modelInfo.provider}:{pane.modelInfo.name}
+            {pane.modelInfo.name}
           </h4>
           <div className="model-details">
             <span className="model-detail">

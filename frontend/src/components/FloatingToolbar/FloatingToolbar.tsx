@@ -11,6 +11,7 @@ export interface FloatingToolbarProps {
   onMinimizeAll: () => void;
   onCloseAll: () => void;
   onBroadcastToActive?: (paneIds: string[], prompt: string) => void;
+  onOpenArena?: () => void;
 }
 
 export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
@@ -21,7 +22,8 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
   onArrangeWindows,
   onMinimizeAll,
   onCloseAll,
-  onBroadcastToActive
+  onBroadcastToActive,
+  onOpenArena
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [showCompareSelector, setShowCompareSelector] = useState(false);
@@ -64,7 +66,6 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
     return pane ? `${pane.modelInfo.provider}:${pane.modelInfo.name}` : 'Unknown';
   };
 
-  // Broadcast functions
   const handleBroadcastStart = () => {
     if (paneCount > 0) {
       setShowBroadcastSelector(true);
@@ -101,39 +102,21 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
     }
   };
 
-  const selectAllBroadcastPanes = () => {
-    setSelectedBroadcastPanes(new Set(activePanes.map(p => p.id)));
-  };
+  const selectAllBroadcastPanes = () => setSelectedBroadcastPanes(new Set(activePanes.map(p => p.id)));
+  const clearAllBroadcastPanes = () => setSelectedBroadcastPanes(new Set());
 
-  const clearAllBroadcastPanes = () => {
-    setSelectedBroadcastPanes(new Set());
-  };
-
-  // Token estimation for broadcast
-  const estimateTokens = (text: string): number => {
-    return Math.ceil(text.length / 4);
-  };
+  const estimateTokens = (text: string): number => Math.ceil(text.length / 4);
 
   const getBroadcastEstimates = (paneIds: string[]) => {
     const promptTokens = estimateTokens(broadcastPrompt);
     const estimatedResponseTokens = Math.min(promptTokens * 2, 500);
     const totalTokens = promptTokens + estimatedResponseTokens;
-    
     const totalCost = paneIds.reduce((sum, paneId) => {
       const pane = activePanes.find(p => p.id === paneId);
-      if (pane) {
-        return sum + ((totalTokens / 1000) * (pane.modelInfo.costPer1kTokens || 0));
-      }
+      if (pane) return sum + ((totalTokens / 1000) * (pane.modelInfo.costPer1kTokens || 0));
       return sum;
     }, 0);
-
-    return {
-      promptTokens,
-      estimatedResponseTokens,
-      totalTokens,
-      totalCost,
-      panesCount: paneIds.length
-    };
+    return { promptTokens, estimatedResponseTokens, totalTokens, totalCost, panesCount: paneIds.length };
   };
 
   return (
@@ -145,95 +128,72 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
           title="Window Controls"
         >
           <span className="toggle-icon">{isExpanded ? '✕' : '⚙️'}</span>
-          {paneCount > 0 && (
-            <span className="pane-count">{paneCount}</span>
-          )}
+          {paneCount > 0 && <span className="pane-count">{paneCount}</span>}
         </button>
 
         {isExpanded && (
           <div className="toolbar-menu">
+            {/* Window Management */}
             <div className="menu-section">
               <div className="section-title">Window Management</div>
-              <button
-                className="menu-item"
-                onClick={onArrangeWindows}
-                disabled={paneCount === 0}
-                title="Arrange windows in a grid"
-              >
+              <button className="menu-item" onClick={onArrangeWindows} disabled={paneCount === 0}>
                 <span className="item-icon">📐</span>
                 <span className="item-text">Arrange</span>
               </button>
-              <button
-                className="menu-item"
-                onClick={onMinimizeAll}
-                disabled={paneCount === 0}
-                title="Minimize all windows"
-              >
+              <button className="menu-item" onClick={onMinimizeAll} disabled={paneCount === 0}>
                 <span className="item-icon">🗕</span>
                 <span className="item-text">Minimize All</span>
               </button>
-              <button
-                className="menu-item danger"
-                onClick={onCloseAll}
-                disabled={paneCount === 0}
-                title="Close all windows"
-              >
+              <button className="menu-item danger" onClick={onCloseAll} disabled={paneCount === 0}>
                 <span className="item-icon">🗙</span>
                 <span className="item-text">Close All</span>
               </button>
             </div>
 
+            {/* Broadcast */}
             <div className="menu-section">
               <div className="section-title">Broadcast to Active</div>
-              <button
-                className="menu-item broadcast"
-                onClick={handleBroadcastStart}
-                disabled={paneCount === 0}
-                title={paneCount > 0 ? 'Send message to active LLMs' : 'No active panes'}
-              >
+              <button className="menu-item broadcast" onClick={handleBroadcastStart} disabled={paneCount === 0}>
                 <span className="item-icon">📡</span>
                 <span className="item-text">Broadcast</span>
               </button>
             </div>
 
+            {/* Comparison */}
             <div className="menu-section">
               <div className="section-title">Comparison</div>
               {!isComparing ? (
-                <button
-                  className="menu-item"
-                  onClick={handleCompareStart}
-                  disabled={!canCompare}
-                  title={canCompare ? 'Compare responses' : 'Need at least 2 panes'}
-                >
+                <button className="menu-item" onClick={handleCompareStart} disabled={!canCompare}>
                   <span className="item-icon">⚖️</span>
                   <span className="item-text">Compare</span>
                 </button>
               ) : (
-                <button
-                  className="menu-item active"
-                  onClick={clearComparison}
-                  title="Stop comparing"
-                >
+                <button className="menu-item active" onClick={clearComparison}>
                   <span className="item-icon">✓</span>
                   <span className="item-text">Stop Compare</span>
                 </button>
               )}
+              <button
+                className="menu-item"
+                onClick={() => { setIsExpanded(false); onOpenArena?.(); }}
+                disabled={paneCount === 0}
+                title={paneCount > 0 ? 'Analyze and compare code across panes' : 'No active panes'}
+              >
+                <span className="item-icon">⚔️</span>
+                <span className="item-text">Code Compare Arena</span>
+              </button>
             </div>
           </div>
         )}
       </div>
 
+      {/* Broadcast Selector */}
       {showBroadcastSelector && (
         <div className="broadcast-selector-overlay">
           <div className="broadcast-selector">
             <div className="selector-header">
               <h4>Broadcast to Active LLMs</h4>
-              <button 
-                className="close-btn"
-                onClick={() => setShowBroadcastSelector(false)}
-              >
-                ×
-              </button>
+              <button className="close-btn" onClick={() => setShowBroadcastSelector(false)}>×</button>
             </div>
 
             <div className="broadcast-prompt-section">
@@ -251,18 +211,8 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
               <div className="selection-header">
                 <h5>Select LLMs ({selectedBroadcastPanes.size} of {paneCount} selected)</h5>
                 <div className="selection-controls">
-                  <button
-                    className="select-all-btn"
-                    onClick={selectAllBroadcastPanes}
-                  >
-                    Select All
-                  </button>
-                  <button
-                    className="clear-all-btn"
-                    onClick={clearAllBroadcastPanes}
-                  >
-                    Clear
-                  </button>
+                  <button className="select-all-btn" onClick={selectAllBroadcastPanes}>Select All</button>
+                  <button className="clear-all-btn" onClick={clearAllBroadcastPanes}>Clear</button>
                 </div>
               </div>
 
@@ -270,27 +220,17 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
                 {activePanes.map(pane => {
                   const isSelected = selectedBroadcastPanes.has(pane.id);
                   return (
-                    <div
-                      key={pane.id}
-                      className={`broadcast-pane-option ${isSelected ? 'selected' : ''}`}
-                    >
+                    <div key={pane.id} className={`broadcast-pane-option ${isSelected ? 'selected' : ''}`}>
                       <label className="pane-checkbox">
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => handleBroadcastPaneToggle(pane.id)}
-                        />
+                        <input type="checkbox" checked={isSelected} onChange={() => handleBroadcastPaneToggle(pane.id)} />
                         <div className="pane-info">
                           <div className="pane-name">{getModelName(pane.id)}</div>
-                          <div className="pane-stats">
-                            {pane.messages.length} messages
-                          </div>
+                          <div className="pane-stats">{pane.messages.length} messages</div>
                         </div>
                       </label>
                       {pane.isStreaming && (
                         <div className="streaming-indicator">
-                          <span className="streaming-dot"></span>
-                          Streaming
+                          <span className="streaming-dot"></span>Streaming
                         </div>
                       )}
                     </div>
@@ -299,51 +239,36 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
               </div>
             </div>
 
-            {/* Token estimates */}
             {broadcastPrompt.trim() && (
               <div className="broadcast-estimates">
-                {selectedBroadcastPanes.size > 0 && (
-                  <div className="estimate-card selected">
-                    {(() => {
-                      const estimates = getBroadcastEstimates(Array.from(selectedBroadcastPanes));
-                      const warningLevel = estimates.totalCost >= 0.20 ? 'high' : 
-                                         estimates.totalCost >= 0.05 ? 'medium' : 'low';
-                      
-                      return (
-                        <div className={`estimate-content ${warningLevel}`}>
-                          <div className="estimate-header">
-                            <span className="estimate-icon">
-                              {warningLevel === 'high' ? '⚠️' : warningLevel === 'medium' ? '💰' : '💡'}
-                            </span>
-                            <span>Selected LLMs Estimate</span>
-                          </div>
-                          <div className="estimate-details">
-                            <div className="estimate-row">
-                              <span>Models: {estimates.panesCount}</span>
-                              <span>~{estimates.totalTokens.toLocaleString()} tokens</span>
-                              <span>${estimates.totalCost.toFixed(4)}</span>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })()}
-                  </div>
-                )}
-                
-                <div className="estimate-card all">
-                  {(() => {
-                    const estimates = getBroadcastEstimates(activePanes.map(p => p.id));
-                    const warningLevel = estimates.totalCost >= 0.20 ? 'high' : 
-                                       estimates.totalCost >= 0.05 ? 'medium' : 'low';
-                    
-                    return (
+                {selectedBroadcastPanes.size > 0 && (() => {
+                  const estimates = getBroadcastEstimates(Array.from(selectedBroadcastPanes));
+                  const warningLevel = estimates.totalCost >= 0.20 ? 'high' : estimates.totalCost >= 0.05 ? 'medium' : 'low';
+                  return (
+                    <div className="estimate-card selected">
                       <div className={`estimate-content ${warningLevel}`}>
-                        <div className="estimate-header">
-                          <span className="estimate-icon">
-                            {warningLevel === 'high' ? '⚠️' : warningLevel === 'medium' ? '💰' : '📊'}
-                          </span>
-                          <span>All LLMs Estimate</span>
+                        <span className="estimate-icon">{warningLevel === 'high' ? '⚠️' : warningLevel === 'medium' ? '💰' : '💡'}</span>
+                        <span className="estimate-header">Selected LLMs Estimate</span>
+                        <div className="estimate-details">
+                          <div className="estimate-row">
+                            <span>Models: {estimates.panesCount}</span>
+                            <span>~{estimates.totalTokens.toLocaleString()} tokens</span>
+                            <span>${estimates.totalCost.toFixed(4)}</span>
+                          </div>
                         </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {(() => {
+                  const estimates = getBroadcastEstimates(activePanes.map(p => p.id));
+                  const warningLevel = estimates.totalCost >= 0.20 ? 'high' : estimates.totalCost >= 0.05 ? 'medium' : 'low';
+                  return (
+                    <div className="estimate-card all">
+                      <div className={`estimate-content ${warningLevel}`}>
+                        <span className="estimate-icon">{warningLevel === 'high' ? '⚠️' : warningLevel === 'medium' ? '💰' : '📊'}</span>
+                        <span className="estimate-header">All LLMs Estimate</span>
                         <div className="estimate-details">
                           <div className="estimate-row">
                             <span>Models: {estimates.panesCount}</span>
@@ -351,37 +276,23 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
                             <span>${estimates.totalCost.toFixed(4)}</span>
                           </div>
                           {estimates.totalCost >= 0.20 && (
-                            <div className="cost-warning">
-                              High cost operation - consider selecting fewer LLMs
-                            </div>
+                            <div className="cost-warning">High cost operation - consider selecting fewer LLMs</div>
                           )}
                         </div>
                       </div>
-                    );
-                  })()}
-                </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
             <div className="selector-actions">
-              <button
-                className="cancel-btn"
-                onClick={() => setShowBroadcastSelector(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="broadcast-selected-btn"
-                onClick={handleBroadcastToSelected}
-                disabled={!broadcastPrompt.trim() || selectedBroadcastPanes.size === 0}
-              >
+              <button className="cancel-btn" onClick={() => setShowBroadcastSelector(false)}>Cancel</button>
+              <button className="broadcast-selected-btn" onClick={handleBroadcastToSelected}
+                disabled={!broadcastPrompt.trim() || selectedBroadcastPanes.size === 0}>
                 🚀 Send to Selected ({selectedBroadcastPanes.size})
               </button>
-              <button
-                className="broadcast-all-btn"
-                onClick={handleBroadcastToAll}
-                disabled={!broadcastPrompt.trim()}
-              >
+              <button className="broadcast-all-btn" onClick={handleBroadcastToAll} disabled={!broadcastPrompt.trim()}>
                 📡 Send to All ({paneCount})
               </button>
             </div>
@@ -389,17 +300,13 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
         </div>
       )}
 
+      {/* Compare Selector */}
       {showCompareSelector && (
         <div className="compare-selector-overlay">
           <div className="compare-selector">
             <div className="selector-header">
               <h4>Select Panes to Compare</h4>
-              <button 
-                className="close-btn"
-                onClick={() => setShowCompareSelector(false)}
-              >
-                ×
-              </button>
+              <button className="close-btn" onClick={() => setShowCompareSelector(false)}>×</button>
             </div>
 
             <div className="pane-selection">
@@ -408,14 +315,8 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
                 {activePanes.map(pane => (
                   <button
                     key={`first-${pane.id}`}
-                    className={`pane-btn ${
-                      tempSelection.first === pane.id ? 'selected' : ''
-                    } ${tempSelection.second === pane.id ? 'disabled' : ''}`}
-                    onClick={() => {
-                      if (tempSelection.second !== pane.id) {
-                        setTempSelection(prev => ({ ...prev, first: pane.id }));
-                      }
-                    }}
+                    className={`pane-btn ${tempSelection.first === pane.id ? 'selected' : ''} ${tempSelection.second === pane.id ? 'disabled' : ''}`}
+                    onClick={() => { if (tempSelection.second !== pane.id) setTempSelection(prev => ({ ...prev, first: pane.id })); }}
                     disabled={tempSelection.second === pane.id}
                   >
                     {getModelName(pane.id)}
@@ -430,14 +331,8 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
                 {activePanes.map(pane => (
                   <button
                     key={`second-${pane.id}`}
-                    className={`pane-btn ${
-                      tempSelection.second === pane.id ? 'selected' : ''
-                    } ${tempSelection.first === pane.id ? 'disabled' : ''}`}
-                    onClick={() => {
-                      if (tempSelection.first !== pane.id) {
-                        setTempSelection(prev => ({ ...prev, second: pane.id }));
-                      }
-                    }}
+                    className={`pane-btn ${tempSelection.second === pane.id ? 'selected' : ''} ${tempSelection.first === pane.id ? 'disabled' : ''}`}
+                    onClick={() => { if (tempSelection.first !== pane.id) setTempSelection(prev => ({ ...prev, second: pane.id })); }}
                     disabled={tempSelection.first === pane.id}
                   >
                     {getModelName(pane.id)}
@@ -447,17 +342,9 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
             </div>
 
             <div className="selector-actions">
-              <button
-                className="cancel-btn"
-                onClick={() => setShowCompareSelector(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="apply-btn"
-                onClick={applyComparison}
-                disabled={!tempSelection.first || !tempSelection.second || tempSelection.first === tempSelection.second}
-              >
+              <button className="cancel-btn" onClick={() => setShowCompareSelector(false)}>Cancel</button>
+              <button className="apply-btn" onClick={applyComparison}
+                disabled={!tempSelection.first || !tempSelection.second || tempSelection.first === tempSelection.second}>
                 Start Comparison
               </button>
             </div>

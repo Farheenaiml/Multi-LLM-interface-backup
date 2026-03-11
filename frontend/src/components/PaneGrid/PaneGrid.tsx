@@ -26,13 +26,9 @@ const initWinBox = async (): Promise<WinBoxConstructor | null> => {
   }
 
   try {
-    // Use dynamic import which should work better with Vite
     const winboxModule = await import('winbox');
-
-    // Log what we got to debug
     console.log('WinBox module imported:', winboxModule);
 
-    // Try to find the constructor in different places
     const possibleConstructors = [
       winboxModule.default,
       winboxModule,
@@ -97,8 +93,6 @@ const PaneWindowContent: React.FC<PaneWindowContentProps> = ({
 
   const handleSelectContent = (content: SelectedContent) => {
     setCurrentSelection(content);
-    // Optional: propagate selection change if needed
-    // onPaneAction?.({ type: 'select', paneId: pane.id, data: content });
   };
 
   const handleSendTo = (paneId: string) => {
@@ -180,17 +174,18 @@ export const PaneGrid: React.FC<PaneGridProps> = ({
     const offsetX = (windowCount % 3) * 50;
     const offsetY = Math.floor(windowCount / 3) * 50;
 
-    // Create a container div for the React component
     const contentDiv = document.createElement('div');
     contentDiv.style.height = '100%';
     contentDiv.style.overflow = 'hidden';
 
-    // Create React root
     const root = createRoot(contentDiv);
     rootsRef.current.set(pane.id, root);
 
+    // FIX: Show only model name, no provider prefix
+    const windowTitle = pane.modelInfo?.name || 'Unknown Model';
+
     const winbox = new WinBoxConstructor({
-      title: `${pane.modelInfo?.provider || 'Unknown'}:${pane.modelInfo?.name || 'Unknown'} `,
+      title: windowTitle,
       width: 450,
       height: 600,
       x: 100 + offsetX,
@@ -208,33 +203,22 @@ export const PaneGrid: React.FC<PaneGridProps> = ({
         unregisterWindow(pane.id);
         removePane(pane.id);
         onPaneAction?.({ type: 'close', paneId: pane.id });
-        return false; // Prevent default close behavior
+        return false;
       },
-      onresize: (_width: number, _height: number) => {
-        // Handle window resize if needed
-      },
-      onmove: (_x: number, _y: number) => {
-        // Handle window move if needed
-      },
+      onresize: (_width: number, _height: number) => {},
+      onmove: (_x: number, _y: number) => {},
       onmaximize: () => {
-        // Custom maximize behavior - resize to 1/3 of screen instead of full screen
         const containerRect = containerRef.current?.getBoundingClientRect();
         if (containerRect) {
           const targetWidth = Math.floor(containerRect.width / 3);
-          const targetHeight = Math.floor(containerRect.height * 0.8); // 80% of height
-          const targetX = 50;
-          const targetY = 50;
-
-          // Resize and position the window
+          const targetHeight = Math.floor(containerRect.height * 0.8);
           winbox.resize(targetWidth, targetHeight);
-          winbox.move(targetX, targetY);
+          winbox.move(50, 50);
         }
-        return false; // Prevent default maximize behavior
+        return false;
       }
     });
 
-    // Render React component into the content div
-    // Render React component into the content div
     renderPaneContent(pane);
 
     windowsRef.current.set(pane.id, winbox);
@@ -255,46 +239,40 @@ export const PaneGrid: React.FC<PaneGridProps> = ({
     );
   };
 
-
-
-
-
-  // Expose functions to window for button clicks
-
-
   // Update window content when pane data changes
   useEffect(() => {
     console.log('🔄 PaneGrid: useEffect triggered! activePanes:', Object.keys(activePanes).length);
     console.log('🔄 Available pane IDs:', Object.keys(activePanes));
     console.log('🔄 Window IDs:', Array.from(windowsRef.current.keys()));
 
-    // Force update all windows
     Object.values(activePanes).forEach(pane => {
-      const window = windowsRef.current.get(pane.id);
-      if (window && window.body) {
+      const win = windowsRef.current.get(pane.id);
+      if (win) {
+        // FIX: removed win.body check — it was blocking renders when WinBox wasn't fully mounted
         console.log('✅ PaneGrid: Updating pane', pane.id, 'with', pane.messages.length, 'messages');
-        console.log('📝 Messages:', pane.messages.map(m => `${m.role}: ${m.content.substring(0, 30)}...`));
         renderPaneContent(pane);
       } else {
-        console.log('❌ PaneGrid: Window not found for pane', pane.id);
+        console.log('❌ PaneGrid: Window not found for pane', pane.id, '— retrying in 300ms');
+        // FIX: retry after short delay to handle race condition between store update and window creation
+        setTimeout(() => {
+          const retryWin = windowsRef.current.get(pane.id);
+          if (retryWin) {
+            console.log('✅ PaneGrid: Retry succeeded for pane', pane.id);
+            renderPaneContent(pane);
+          }
+        }, 300);
       }
     });
   }, [activePanes, isCompareMode, selectedPanes]);
-
-
 
   // Update window styling for compare mode
   useEffect(() => {
     windowsRef.current.forEach((window, paneId) => {
       const isInCompare = selectedPanes?.includes(paneId) || false;
       const windowElement = window.dom;
-
       if (windowElement) {
-        if (isInCompare) {
-          windowElement.classList.add('compare-mode');
-        } else {
-          windowElement.classList.remove('compare-mode');
-        }
+        if (isInCompare) windowElement.classList.add('compare-mode');
+        else windowElement.classList.remove('compare-mode');
       }
     });
   }, [selectedPanes]);
@@ -310,37 +288,23 @@ export const PaneGrid: React.FC<PaneGridProps> = ({
     windows.forEach((winbox, index) => {
       const col = index % cols;
       const row = Math.floor(index / cols);
-      const x = 50 + col * windowWidth;
-      const y = 50 + row * windowHeight;
-
       winbox.resize(windowWidth - 20, windowHeight - 20);
-      winbox.move(x, y);
+      winbox.move(50 + col * windowWidth, 50 + row * windowHeight);
     });
   };
 
   const minimizeAllWindows = () => {
-    windowsRef.current.forEach(winbox => {
-      winbox.minimize();
-    });
+    windowsRef.current.forEach(winbox => winbox.minimize());
   };
 
   const closeAllWindows = () => {
-    windowsRef.current.forEach(winbox => {
-      winbox.close();
-    });
+    windowsRef.current.forEach(winbox => winbox.close());
   };
 
-  // Expose window management functions
   useEffect(() => {
-    if (onArrangeWindows) {
-      (window as any).arrangeWindows = arrangeWindows;
-    }
-    if (onMinimizeAll) {
-      (window as any).minimizeAllWindows = minimizeAllWindows;
-    }
-    if (onCloseAll) {
-      (window as any).closeAllWindows = closeAllWindows;
-    }
+    if (onArrangeWindows) (window as any).arrangeWindows = arrangeWindows;
+    if (onMinimizeAll) (window as any).minimizeAllWindows = minimizeAllWindows;
+    if (onCloseAll) (window as any).closeAllWindows = closeAllWindows;
 
     return () => {
       delete (window as any).arrangeWindows;
@@ -349,12 +313,9 @@ export const PaneGrid: React.FC<PaneGridProps> = ({
     };
   }, [onArrangeWindows, onMinimizeAll, onCloseAll]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
-      windowsRef.current.forEach(window => {
-        window.close();
-      });
+      windowsRef.current.forEach(window => window.close());
       windowsRef.current.clear();
     };
   }, []);
@@ -366,12 +327,7 @@ export const PaneGrid: React.FC<PaneGridProps> = ({
       <div
         ref={containerRef}
         className="window-manager-container"
-        style={{
-          width: '100%',
-          height: '100%',
-          position: 'relative',
-          overflow: 'hidden'
-        }}
+        style={{ width: '100%', height: '100%', position: 'relative', overflow: 'hidden' }}
       >
         {paneCount === 0 && (
           <div className="no-panes-message">
@@ -391,14 +347,10 @@ export const PaneGrid: React.FC<PaneGridProps> = ({
         <div className="compare-mode-indicator">
           <div className="compare-status">
             <span className="compare-icon">⚖️</span>
-            <span className="compare-text">
-              Comparing {selectedPanes.length} panes
-            </span>
+            <span className="compare-text">Comparing {selectedPanes.length} panes</span>
           </div>
         </div>
       )}
-
-
     </div>
   );
 };

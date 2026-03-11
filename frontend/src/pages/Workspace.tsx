@@ -6,11 +6,9 @@ import { FloatingSessionMetrics } from '../components/FloatingSessionMetrics/Flo
 import { PaneGrid } from '../components/PaneGrid';
 import { SendToMenu } from '../components/SendToMenu';
 import { DiffViewer } from '../components/DiffViewer/DiffViewer';
-
-
+import { CodeCompareArena } from '../components/CodeCompareArena/CodeCompareArena';
 import { ModelInfo, SelectedContent, TransferContent } from '../types';
 import { apiService } from '../services/api';
-
 import './Workspace.css';
 
 export const Workspace: React.FC = () => {
@@ -29,127 +27,79 @@ export const Workspace: React.FC = () => {
     setAvailableModels,
     updatePaneMessages,
     updatePaneStreaming
+    currentSession, createSession, activePanes, availableModels,
+    isComparing, selectedPanes, setComparing, setSelectedPanes,
+    refreshSessionFromBackend, addPane, addPaneWithId,
+    setAvailableModels, updatePaneMessages
   } = useAppStore();
 
   const [isStreaming, setIsStreaming] = useState(false);
   const [sendToMenuVisible, setSendToMenuVisible] = useState(false);
   const [sessionMetricsVisible, setSessionMetricsVisible] = useState(false);
-
-
+  const [arenaVisible, setArenaVisible] = useState(false);
   const [sendToData, setSendToData] = useState<{
     sourcePane: string;
     selectedContent: SelectedContent;
   } | null>(null);
 
-
   useEffect(() => {
-    // Create a session if none exists
-    if (!currentSession) {
-      createSession();
-    }
+    if (!currentSession) createSession();
   }, [currentSession, createSession]);
 
-  // Initialize WebSocket connection when session is available (using global manager)
   useEffect(() => {
-    if (currentSession) {
-      console.log(`🔌 Ensuring WebSocket for session: ${currentSession.id}`);
-      // WebSocket is now managed globally by the store
-      // No need to manage it at component level
-    }
+    if (currentSession) console.log(`🔌 Ensuring WebSocket for session: ${currentSession.id}`);
   }, [currentSession]);
 
-  // Fetch available models from backend
   useEffect(() => {
+    const setFallbackModels = () => {
+      console.warn('⚠️ Using fallback models');
+      setAvailableModels([
+        { id: 'google:gemini-2.5-flash', name: 'Gemini 2.5 Flash', provider: 'google', maxTokens: 1048576, costPer1kTokens: 0.0007, supportsStreaming: true },
+        { id: 'google:gemini-2.0-flash', name: 'Gemini 2.0 Flash', provider: 'google', maxTokens: 1048576, costPer1kTokens: 0.0001, supportsStreaming: true },
+        { id: 'google:gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash Lite', provider: 'google', maxTokens: 1048576, costPer1kTokens: 0.000075, supportsStreaming: true },
+        { id: 'google:gemini-1.5-flash', name: 'Gemini 1.5 Flash', provider: 'google', maxTokens: 1048576, costPer1kTokens: 0.000075, supportsStreaming: true },
+        { id: 'groq:llama-3.1-8b-instant', name: 'Llama 3.1 8B Instant', provider: 'groq', maxTokens: 8192, costPer1kTokens: 0.0001, supportsStreaming: true },
+        { id: 'groq:llama-3.3-70b-versatile', name: 'Llama 3.3 70B Versatile', provider: 'groq', maxTokens: 32768, costPer1kTokens: 0.0005, supportsStreaming: true },
+        { id: 'groq:qwen-qwq-32b', name: 'Qwen 3 32B', provider: 'groq', maxTokens: 32768, costPer1kTokens: 0.0008, supportsStreaming: true },
+        { id: 'groq:compound', name: 'Compound', provider: 'groq', maxTokens: 4096, costPer1kTokens: 0.0002, supportsStreaming: true }
+      ]);
+    };
+
+    // Always fetch fresh from backend on mount — ignore any cached/stale models
     const fetchModels = async () => {
-      if (availableModels.length === 0) {
-        try {
-          console.log('Fetching models from backend...');
-          const response = await fetch('http://localhost:5000/models');
-
-          if (response.ok) {
-            const data = await response.json();
-            console.log('Backend response:', data);
-
-            if (data.models && Array.isArray(data.models)) {
-              // Transform backend model format to frontend format
-              const transformedModels = data.models.map((model: any) => ({
-                id: model.id,
-                name: model.name,
-                provider: model.provider,
-                maxTokens: model.max_tokens,
-                costPer1kTokens: model.cost_per_1k_tokens,
-                supportsStreaming: model.supports_streaming
-              }));
-
-              setAvailableModels(transformedModels);
-              console.log('Successfully loaded models from backend:', transformedModels);
-            } else {
-              console.warn('Invalid models response format, using fallback');
-              setFallbackModels();
-            }
+      try {
+        const response = await fetch('http://localhost:5000/models');
+        if (response.ok) {
+          const data = await response.json();
+          if (data.models && Array.isArray(data.models) && data.models.length > 0) {
+            const transformedModels = data.models.map((model: any) => ({
+              id: model.id, name: model.name, provider: model.provider,
+              maxTokens: model.max_tokens, costPer1kTokens: model.cost_per_1k_tokens,
+              supportsStreaming: model.supports_streaming
+            }));
+            setAvailableModels(transformedModels);
+            console.log(`✅ Loaded ${transformedModels.length} models from backend`);
           } else {
-            console.warn('Backend not available, using fallback models');
             setFallbackModels();
           }
-        } catch (error) {
-          console.error('Error fetching models from backend:', error);
+        } else {
           setFallbackModels();
         }
+      } catch (error) {
+        console.warn('⚠️ Could not reach backend, using fallback models', error);
+        setFallbackModels();
       }
     };
 
-    const setFallbackModels = () => {
-      const fallbackModels = [
-        {
-          id: 'google:gemini-2.5-flash',
-          name: 'Gemini 2.5 Flash',
-          provider: 'google',
-          maxTokens: 1048576,
-          costPer1kTokens: 0.0007,
-          supportsStreaming: true
-        },
-        {
-          id: 'groq:llama-3.1-8b-instant',
-          name: 'Llama 3.1 8B Instant',
-          provider: 'groq',
-          maxTokens: 8192,
-          costPer1kTokens: 0.0001,
-          supportsStreaming: true
-        },
-        {
-          id: 'groq:llama-3.3-70b-versatile',
-          name: 'Llama 3.3 70B Versatile',
-          provider: 'groq',
-          maxTokens: 32768,
-          costPer1kTokens: 0.0005,
-          supportsStreaming: true
-        },
-        {
-          id: 'groq:compound',
-          name: 'Compound',
-          provider: 'groq',
-          maxTokens: 4096,
-          costPer1kTokens: 0.0002,
-          supportsStreaming: true
-        }
-      ];
-
-      setAvailableModels(fallbackModels);
-      console.log('Using fallback models:', fallbackModels);
-    };
-
     fetchModels();
-  }, [availableModels, setAvailableModels]);
+  }, [setAvailableModels]); // no availableModels dep — always runs fresh on mount
 
   const handleModelSelect = async (model: ModelInfo, prompt?: string, images?: string[]) => {
-    // Reuse the broadcast logic for single model selection
-    // This ensures consistency and proper backend session creation
     await handleMultiModelSelect([model], prompt || '', images);
   };
 
   const handleSendMessage = async (paneId: string, message: string, images?: string[]) => {
     if (!currentSession) return;
-
     const pane = activePanes[paneId];
     if (!pane) return;
 
@@ -165,19 +115,16 @@ export const Workspace: React.FC = () => {
 
     // Set streaming state to true to show loading indicator
     updatePaneStreaming(paneId, true);
+    updatePaneMessages(paneId, {
+      id: `msg-${Date.now()}-user`, role: 'user' as const,
+      content: message, images, timestamp: new Date()
+    });
 
     try {
-      // Send message to existing pane using new chat endpoint
       const response = await fetch(`http://localhost:5000/chat/${paneId}`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          session_id: currentSession.id,
-          message: message,
-          images: images
-        })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: currentSession.id, message, images })
       });
 
       if (response.ok) {
@@ -186,6 +133,7 @@ export const Workspace: React.FC = () => {
         console.error('Failed to send message:', response.statusText);
         updatePaneStreaming(paneId, false);
       }
+      if (!response.ok) console.error('Failed to send message:', response.statusText);
     } catch (error) {
       console.error('Error sending message:', error);
       updatePaneStreaming(paneId, false);
@@ -194,62 +142,36 @@ export const Workspace: React.FC = () => {
 
   const handleMultiModelSelect = async (models: ModelInfo[], prompt: string, images?: string[]) => {
     if (!currentSession || models.length === 0) return;
-
     setIsStreaming(true);
-    console.log(`Broadcasting to ${models.length} models:`, models.map(m => m.name));
 
     try {
-      // Call the backend broadcast endpoint
       const response = await fetch('http://localhost:5000/broadcast', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          session_id: currentSession.id,
-          prompt: prompt,
-          images: images,
+          session_id: currentSession.id, prompt, images,
           models: models.map(model => ({
-            provider_id: model.provider,
-            model_id: model.id,
-            temperature: 0.7,
-            max_tokens: 1000
+            provider_id: model.provider, model_id: model.id.includes(":") ? model.id.split(":").slice(1).join(":") : model.id,
+            temperature: 0.7, max_tokens: 1000
           }))
         })
       });
 
       if (response.ok) {
         const result = await response.json();
-        console.log('Broadcast started:', result);
-
-        // Create panes for each model if they don't exist and add user message
         result.pane_ids.forEach((paneId: string, index: number) => {
           const modelInfo = models[index];
-
           if (modelInfo && !activePanes[paneId]) {
-            console.log('🎯 Creating pane with ID:', paneId, 'for model:', modelInfo.name);
             addPaneWithId(paneId, modelInfo);
-
-            // Add the user message to the pane using backend-provided ID
             const userMessageId = result.user_message_ids?.[paneId];
             if (userMessageId) {
-              const userMessage = {
-                id: userMessageId, // Use backend-generated ID
-                role: 'user' as const,
-                content: prompt,
-                images: images,
-                timestamp: new Date()
-              };
-              updatePaneMessages(paneId, userMessage);
-              console.log('✅ Added user message with backend ID:', userMessageId);
-            } else {
-              console.warn('⚠️ No user message ID provided by backend for pane:', paneId);
+              updatePaneMessages(paneId, {
+                id: userMessageId, role: 'user' as const,
+                content: prompt, images, timestamp: new Date()
+              });
             }
           }
         });
-
-      } else {
-        console.error('Broadcast failed:', response.statusText);
       }
     } catch (error) {
       console.error('Error broadcasting:', error);
@@ -259,27 +181,14 @@ export const Workspace: React.FC = () => {
   };
 
   const handleCompareToggle = (paneIds: [string, string] | null) => {
-    console.log('handleCompareToggle called with:', paneIds);
-    console.log('Current activePanes before toggle:', Object.keys(activePanes));
-
     setSelectedPanes(paneIds);
     setComparing(!!paneIds);
   };
 
   const handlePaneAction = (action: any) => {
-    switch (action.type) {
-      case 'sendTo':
-        setSendToData({
-          sourcePane: action.paneId,
-          selectedContent: action.data || { messageIds: [], text: '' }
-        });
-        setSendToMenuVisible(true);
-        break;
-      case 'close':
-        // Pane closing is handled by the store
-        break;
-      default:
-        console.log('Unknown pane action:', action);
+    if (action.type === 'sendTo') {
+      setSendToData({ sourcePane: action.paneId, selectedContent: action.data || { messageIds: [], text: '' } });
+      setSendToMenuVisible(true);
     }
   };
 
@@ -290,58 +199,23 @@ export const Workspace: React.FC = () => {
     summaryInstructions?: string;
   }) => {
     if (!sendToData) return;
-
     try {
-      console.log('Sending content to pane:', {
-        sourceId: sendToData.sourcePane,
-        targetId: targetPaneId,
-        content,
-        options
-      });
-
-      // Call the API to transfer content with full context
       const result = await apiService.sendToPane({
-        sourceId: sendToData.sourcePane,
-        targetId: targetPaneId,
-        content: content,
-        sessionId: currentSession?.id || 'default-session',
-        transferMode: options.transferMode,
-        additionalContext: options.additionalContext,
-        preserveRoles: options.preserveRoles,
-        summaryInstructions: options.summaryInstructions,
-        selectedMessageIds: sendToData.selectedContent.messageIds // Pass original message IDs
+        sourceId: sendToData.sourcePane, targetId: targetPaneId,
+        content, sessionId: currentSession?.id || 'default-session',
+        transferMode: options.transferMode, additionalContext: options.additionalContext,
+        preserveRoles: options.preserveRoles, summaryInstructions: options.summaryInstructions,
+        selectedMessageIds: sendToData.selectedContent.messageIds
       });
-
-      console.log('Transfer result:', result);
-
-      if (result.success) {
-        console.log(`✅ Successfully transferred ${result.transferred_count} messages to pane ${targetPaneId} (mode: ${options.transferMode})`);
-
-        // Refresh the session state from backend to show transferred messages
-        if (currentSession?.id) {
-          await refreshSessionFromBackend(currentSession.id);
-          console.log('🔄 Session state refreshed after transfer');
-        }
-      } else {
-        console.error('❌ Transfer failed:', result);
+      if (result.success && currentSession?.id) {
+        await refreshSessionFromBackend(currentSession.id);
       }
-
-      setSendToMenuVisible(false);
-      setSendToData(null);
     } catch (error) {
       console.error('❌ Failed to transfer content:', error);
-      // Still close the menu even if transfer failed
-      setSendToMenuVisible(false);
-      setSendToData(null);
     }
-  };
-
-  const handleCloseSendToMenu = () => {
     setSendToMenuVisible(false);
     setSendToData(null);
   };
-
-
 
   const handleBroadcastToActive = async (paneIds: string[], prompt: string) => {
     console.log(`Broadcasting to ${paneIds.length} active panes:`, paneIds);
@@ -365,6 +239,13 @@ export const Workspace: React.FC = () => {
         // Use the action to set streaming for existing panes
         updatePaneStreaming(paneId, true);
       });
+    if (!currentSession) return;
+    paneIds.forEach((paneId, index) => {
+      updatePaneMessages(paneId, {
+        id: `msg-${Date.now()}-${index}-user`, role: 'user' as const,
+        content: prompt, timestamp: new Date()
+      });
+    });
 
       console.log('🚀 Sending messages to existing panes via /chat endpoint');
 
@@ -423,44 +304,45 @@ export const Workspace: React.FC = () => {
           id: `msg-${Date.now()}-${index}-error`,
           role: 'assistant' as const,
           content: `Error: Failed to broadcast message. ${error instanceof Error ? error.message : 'Unknown error'}`,
+    await Promise.all(paneIds.map(async (paneId) => {
+      const pane = activePanes[paneId];
+      if (!pane) return;
+      try {
+        const response = await fetch(`${apiService['baseUrl']}/chat/${paneId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: currentSession.id, message: prompt })
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      } catch (error) {
+        updatePaneMessages(paneId, {
+          id: `msg-${Date.now()}-error-${paneId}`, role: 'assistant' as const,
+          content: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
           timestamp: new Date()
         };
         updatePaneMessages(paneId, errorMessage);
         updatePaneStreaming(paneId, false);
       });
     }
+        });
+      }
+    }));
   };
 
-  const handleArrangeWindows = () => {
-    (window as any).arrangeWindows?.();
-  };
-
-  const handleMinimizeAll = () => {
-    (window as any).minimizeAllWindows?.();
-  };
-
-  const handleCloseAll = () => {
-    (window as any).closeAllWindows?.();
-  };
+  const handleArrangeWindows = () => (window as any).arrangeWindows?.();
+  const handleMinimizeAll   = () => (window as any).minimizeAllWindows?.();
+  const handleCloseAll      = () => (window as any).closeAllWindows?.();
 
   const availablePanes = Object.values(activePanes);
-
-  // Debug logging for pane availability
-  console.log('Workspace: activePanes keys:', Object.keys(activePanes));
-  console.log('Workspace: availablePanes count:', availablePanes.length);
-  console.log('Workspace: isComparing:', isComparing);
-  console.log('Workspace: selectedPanes:', selectedPanes);
-
-  // Create a stable reference for comparison to prevent panes from disappearing
-  const panesForComparison = useMemo(() => {
-    return availablePanes.length > 0 ? availablePanes : [];
-  }, [availablePanes]);
+  const panesForComparison = useMemo(() => availablePanes.length > 0 ? availablePanes : [], [availablePanes]);
 
   return (
     <div className="workspace">
-      {/* Top Right Controls Group */}
+
+      {/* ── Top Right Controls ── */}
       <div className="top-right-controls">
-        {/* Session Metrics Toggle Button */}
+
+        {/* Session Metrics Toggle */}
         <button
           className="session-metrics-toggle"
           onClick={() => setSessionMetricsVisible(!sessionMetricsVisible)}
@@ -469,7 +351,7 @@ export const Workspace: React.FC = () => {
           📊
         </button>
 
-        {/* Floating Toolbar (Settings) */}
+        {/* Floating Toolbar (contains Code Compare Arena in menu) */}
         <FloatingToolbar
           activePanes={availablePanes}
           isComparing={isComparing}
@@ -479,25 +361,31 @@ export const Workspace: React.FC = () => {
           onMinimizeAll={handleMinimizeAll}
           onCloseAll={handleCloseAll}
           onBroadcastToActive={handleBroadcastToActive}
+          onOpenArena={() => setArenaVisible(true)}
         />
       </div>
 
-      {/* Floating Session Metrics */}
+      {/* ── Floating Panels ── */}
       <FloatingSessionMetrics
         isVisible={sessionMetricsVisible}
         onToggle={() => setSessionMetricsVisible(!sessionMetricsVisible)}
       />
 
-      {/* Floating Model Selector */}
+      <CodeCompareArena
+        isVisible={arenaVisible}
+        onClose={() => setArenaVisible(false)}
+      />
+
+      {/* ── Floating Model Selector ── */}
       <FloatingModelSelector
         availableModels={availableModels}
         onModelSelect={handleModelSelect}
         onMultiModelSelect={handleMultiModelSelect}
         isStreaming={isStreaming}
       />
-      {/* Main Workspace Area */}
+
+      {/* ── Main Workspace ── */}
       <div className={`workspace-content ${isComparing ? 'comparison-active' : ''}`}>
-        {/* Always show the PaneGrid */}
         <PaneGrid
           onPaneAction={handlePaneAction}
           onSendMessage={handleSendMessage}
@@ -508,26 +396,19 @@ export const Workspace: React.FC = () => {
           onCloseAll={handleCloseAll}
         />
 
-        {/* Show DiffViewer overlay when comparing */}
         {isComparing && selectedPanes && selectedPanes.length >= 2 && (
-          <DiffViewer
-            panes={panesForComparison}
-            selectedPanes={selectedPanes}
-
-          />
+          <DiffViewer panes={panesForComparison} selectedPanes={selectedPanes} />
         )}
       </div>
 
-
-
-      {/* Send To Menu */}
+      {/* ── Send To Menu ── */}
       {sendToMenuVisible && sendToData && (
         <SendToMenu
           sourcePane={sendToData.sourcePane}
           selectedContent={sendToData.selectedContent}
           availableTargets={availablePanes}
           onSendTo={handleSendTo}
-          onClose={handleCloseSendToMenu}
+          onClose={() => { setSendToMenuVisible(false); setSendToData(null); }}
           isVisible={sendToMenuVisible}
         />
       )}
