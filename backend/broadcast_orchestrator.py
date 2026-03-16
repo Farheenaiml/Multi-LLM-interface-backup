@@ -192,14 +192,14 @@ class BroadcastOrchestrator:
             # Get the pane to retrieve conversation history
             pane = next((p for p in session.panes if p.id == pane_id), None)
             if pane and pane.messages:
-                # Include all previous messages for context
+                # Include all previous messages for context (main.py already appended the latest ones here)
                 messages = [
                     Message(role=msg.role, content=msg.content, images=msg.images) 
                     for msg in pane.messages
                 ]
-            
-            # Add the new user message
-            messages.append(Message(role="user", content=request.prompt, images=request.images))
+            else:
+                # Fallback if pane doesn't have messages yet
+                messages.append(Message(role="user", content=request.prompt, images=request.images))
             
             # Log conversation context for debugging
             logger.info(f"🗨️ Sending {len(messages)} messages to {model_id} (pane: {pane_id})")

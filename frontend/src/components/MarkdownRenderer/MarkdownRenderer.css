@@ -68,7 +68,7 @@
   margin: 0.25em 0;
 }
 
-.md-list-item > p {
+.md-list-item>p {
   margin: 0;
 }
 
@@ -81,7 +81,7 @@
   color: #6a737d;
 }
 
-.md-blockquote > p {
+.md-blockquote>p {
   margin: 0.5em 0;
 }
 
@@ -168,77 +168,4 @@
   margin: 24px 0;
   background-color: #e1e4e8;
   border: 0;
-}
-
-/* Dark mode support */
-@media (prefers-color-scheme: dark) {
-  .markdown-content {
-    color: #e1e4e8;
-  }
-
-  .md-h1,
-  .md-h2,
-  .md-h3,
-  .md-h4,
-  .md-h5 {
-    color: #f0f0f0;
-  }
-
-  .md-h6 {
-    color: #8b949e;
-  }
-
-  .md-h1,
-  .md-h2 {
-    border-bottom-color: #30363d;
-  }
-
-  .md-blockquote {
-    border-left-color: #3b434b;
-    background-color: #161b22;
-    color: #8b949e;
-  }
-
-  .md-code-inline {
-    background-color: rgba(110, 118, 129, 0.4);
-    color: #ff7b72;
-  }
-
-  .md-pre {
-    background-color: #161b22;
-    border-color: #30363d;
-  }
-
-  .md-code-block {
-    color: #e1e4e8;
-  }
-
-  .md-link {
-    color: #58a6ff;
-  }
-
-  .md-strong {
-    color: #f0f0f0;
-  }
-
-  .md-table {
-    border-color: #30363d;
-  }
-
-  .md-th,
-  .md-td {
-    border-color: #30363d;
-  }
-
-  .md-th {
-    background-color: #161b22;
-  }
-
-  .md-tr:nth-child(even) {
-    background-color: #0d1117;
-  }
-
-  .md-hr {
-    background-color: #30363d;
-  }
 }

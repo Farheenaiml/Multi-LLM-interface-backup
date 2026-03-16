@@ -686,28 +686,7 @@ nhanced Animations */
   box-shadow: none;
 }
 
-/* Dark mode support (if needed) */
-@media (prefers-color-scheme: dark) {
-  .chat-pane {
-    background: rgba(15, 23, 42, 0.95);
-    border-color: rgba(51, 65, 85, 0.3);
-  }
-  
-  .pane-header,
-  .chat-input-section,
-  .pane-actions {
-    background: linear-gradient(135deg, rgba(30, 41, 59, 0.8) 0%, rgba(51, 65, 85, 0.8) 100%);
-    border-color: rgba(71, 85, 105, 0.3);
-  }
-  
-  .message-text {
-    color: #e2e8f0;
-  }
-  
-  .model-name {
-    color: #f1f5f9;
-  }
-}
+
 
 /* File Upload Styles */
 .file-previews {

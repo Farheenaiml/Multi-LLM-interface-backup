@@ -11,8 +11,8 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from uuid import uuid4
 
-import httpx
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException, Depends
+app.include_router(chat_router)
+app.include_router(rag_router)  # Added RAG search feature
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from dotenv import load_dotenv
@@ -20,16 +20,24 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+# RAG Imports
+
+# RAG Imports
+from rag.document_processor import DocumentProcessor
+from rag.vector_store import VectorStore
+
 from models import (
     BroadcastRequest, BroadcastResponse, SendToRequest, SendToResponse,
     SummaryRequest, SummaryResponse, HealthResponse, Session, ChatPane,
-    Message, StreamEvent, ModelSelection, ProvenanceInfo
+    Message, StreamEvent, ModelSelection, ProvenanceInfo,
+    SearchPrivateRequest, RAGQueryRequest
 )
 from adapters.registry import registry
 from broadcast_orchestrator import BroadcastOrchestrator
 from session_manager import SessionManager
 from error_handler import error_handler
 from websocket_manager import connection_manager
+from web_search import search_web, should_search_web
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -46,6 +54,21 @@ app = FastAPI(
     description="Backend API for broadcasting prompts to multiple LLM providers",
     version="0.1.0"
 )
+
+# Global RAG Components
+document_processor = None
+vector_store = None
+
+@app.on_event("startup")
+async def startup_event():
+    global document_processor, vector_store
+    try:
+        logger.info("Initializing Private RAG components...")
+        document_processor = DocumentProcessor()
+        vector_store = VectorStore(persist_directory="/tmp/chroma_db", collection_name="private_documents")
+        logger.info("Private RAG components initialized successfully.")
+    except Exception as e:
+        logger.error(f"Failed to initialize Private RAG components: {e}")
 
 # Configure CORS
 app.add_middleware(
@@ -167,6 +190,124 @@ async def health_check():
         return HealthResponse(status="unhealthy", service="multi-llm-broadcast-workspace")
 
 
+# ==========================================
+# PRIVATE RAG ENDPOINTS
+# ==========================================
+
+@app.post("/upload-document")
+async def upload_document(file: UploadFile = File(...)):
+    """
+    Ingest a PDF, DOCX, or TXT file into the Private RAG vector DB.
+    """
+    if not document_processor or not vector_store:
+        raise HTTPException(status_code=503, detail="RAG system is not initialized.")
+        
+    try:
+        content_bytes = await file.read()
+        
+        # 1. Process and extract chunks
+        chunks = await document_processor.ingest_file(file.filename, content_bytes)
+        if not chunks:
+            raise HTTPException(status_code=400, detail="No extractable text found in document.")
+            
+        # 2. Convert and store embeddings
+        metadata = {"filename": file.filename}
+        vector_store.add_documents(chunks, metadata)
+        
+        return {
+            "status": "success",
+            "filename": file.filename,
+            "chunks_processed": len(chunks),
+            "message": "Document uploaded and indexed successfully."
+        }
+    except Exception as e:
+        logger.error(f"Failed to process document {file.filename}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/search-private")
+async def search_private(request: SearchPrivateRequest):
+    """
+    Search the private documents vector DB for relevant context.
+    """
+    if not vector_store:
+        raise HTTPException(status_code=503, detail="RAG system is not initialized.")
+        
+    try:
+        results = vector_store.search_similar(request.query, top_k=request.top_k)
+        return {
+            "query": request.query,
+            "num_results": len(results),
+            "chunks": results
+        }
+    except Exception as e:
+        logger.error(f"Private search failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/rag-query")
+async def rag_query(request: RAGQueryRequest):
+    """
+    Full pipeline: retrieve relevant chunks, stuff them into a prompt context, and query LiteLLM directly.
+    """
+    import httpx
+    
+    if not vector_store:
+        raise HTTPException(status_code=503, detail="RAG system is not initialized.")
+        
+    try:
+        # 1. Retrieve context
+        chunks = vector_store.search_similar(request.query, top_k=4)
+        if not chunks:
+            return {"answer": "I don't have enough information in the provided documents to answer that."}
+            
+        # 2. Prepare Prompt
+        context_str = "\n\n---\n\n".join(chunks)
+        
+        system_prompt = (
+            "You are a helpful assistant. Please answer the user's question using ONLY the provided Context.\n"
+            "If the answer is not contained within the Context, explicitly state 'I cannot answer this based on the provided documents.'"
+        )
+        
+        user_prompt = f"Context:\n{context_str}\n\nQuestion:\n{request.query}\n\nInstructions:\nAnswer only using the provided context."
+        
+        # 3. Query LiteLLM API directly
+        litellm_base = os.getenv("LITELLM_BASE_URL", "http://litellm:8000").rstrip("/")
+        litellm_url = f"{litellm_base}/chat/completions"
+        litellm_key = os.getenv("LITELLM_MASTER_KEY", "sk-1234")
+        
+        payload = {
+            "model": request.model_id,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.1,
+            "max_tokens": 1024
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {litellm_key}",
+            "Content-Type": "application/json"
+        }
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(litellm_url, json=payload, headers=headers)
+            
+            if resp.status_code != 200:
+                logger.error(f"LiteLLM error: {resp.text}")
+                raise HTTPException(status_code=502, detail="Failed to generate answer from LiteLLM.")
+                
+            data = resp.json()
+            answer = data.get("choices", [{}])[0].get("message", {}).get("content", "Error generating response.")
+            
+            return {
+                "answer": answer,
+                "retrieved_chunks": len(chunks)
+            }
+            
+    except Exception as e:
+        logger.error(f"RAG query failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/broadcast", response_model=BroadcastResponse)
 async def create_broadcast(request: BroadcastRequest):
     """Create a broadcast request to multiple LLM providers"""
@@ -195,9 +336,74 @@ async def create_broadcast(request: BroadcastRequest):
             print(f"📋 Model info: {model_info}")
 
             if model_info:
+<<<<<<< HEAD
                 user_message = Message(role="user", content=request.prompt, images=request.images)
                 print(f"📝 Created user message with ID: {user_message.id}")
                 pane = ChatPane(model_info=model_info, messages=[user_message])
+=======
+                # Handle Automatic Smart Search logic
+                enhanced_prompt = request.prompt
+                needs_search = False
+                search_query = enhanced_prompt
+
+                # Explicit trigger check
+                if enhanced_prompt.strip().lower().startswith(("/search ", "/research ")):
+                    needs_search = True
+                    search_query = enhanced_prompt.split(" ", 1)[1]
+                else:
+                    # Smart router check
+                    logger.info("🧠 Checking if prompt needs web search via Smart Router...")
+                    needs_search = await should_search_web(enhanced_prompt)
+
+                if needs_search:
+                    logger.info(f"🔎 Web Search triggered for: {search_query}")
+                    try:
+                        search_data = await search_web(search_query)
+                        search_results = search_data.get("results", [])
+                        search_images = search_data.get("images", [])
+
+                        if search_results:
+                            context_str = (
+                                "=================================================================\n"
+                                "SYSTEM DIRECTIVE: STRICT FORMATTING REQUIRED FOR WEB RESEARCH\n"
+                                "=================================================================\n"
+                                "You are an AI assistant answering a query using the live internet data provided below.\n"
+                                "YOU MUST OBEY THESE TWO RULES STRICTLY:\n"
+                                "1. You MUST explicitly embed Markdown links to the sources provided below. Use format: `[Source Name](URL)`.\n"
+                            )
+                            
+                            if search_images:
+                                context_str += f"2. You MUST embed this exact image URL at the top of your response: `![Context Image]({search_images[0]})`\n"
+                            else:
+                                context_str += "2. (No images available for this search)\n"
+                                
+                            context_str += "\n--- SEARCH RESULTS ---\n"
+
+                            for res in search_results:
+                                context_str += f"Title: {res['title']}\nURL: {res['url']}\nContent: {res['content']}\n\n"
+                            context_str += "=================================================================\n\n"
+                            
+                    except Exception as e:
+                        logger.error(f"Failed to perform web search: {e}")
+                
+                # Create user message
+                user_message = Message(
+                    role="user", 
+                    content=enhanced_prompt,
+                    images=request.images
+                )
+                print(f"📝 Created user message with ID: {user_message.id}")
+                
+                messages_list = []
+                if needs_search and 'context_str' in locals() and context_str:
+                    messages_list.append(Message(role="system", content=context_str))
+                messages_list.append(user_message)
+
+                pane = ChatPane(
+                    model_info=model_info,
+                    messages=messages_list
+                )
+>>>>>>> 26014c0 (Added RAG search feature)
                 session.panes.append(pane)
                 pane_ids.append(pane.id)
                 user_message_ids[pane.id] = user_message.id
@@ -241,8 +447,67 @@ async def send_chat_message(pane_id: str, request: dict):
 
         logger.info(f"🔍 CHAT REQUEST DEBUG: Model ID: {pane.model_info.id} (Provider: {pane.model_info.provider})")
         images = request.get("images")
+<<<<<<< HEAD
 
         user_message = Message(role="user", content=message, images=images)
+=======
+        if images:
+            logger.info(f"🔍 CHAT REQUEST DEBUG: Received {len(images)} images")
+            logger.info(f"🔍 CHAT REQUEST DEBUG: Image preview: {images[0][:50]}...")
+        # Handle Automatic Smart Search for single chat message
+        enhanced_message = message
+        needs_search = False
+        search_query = enhanced_message
+
+        if enhanced_message.strip().lower().startswith(("/search ", "/research ")):
+            needs_search = True
+            search_query = enhanced_message.split(" ", 1)[1]
+        else:
+            logger.info("🧠 Checking if prompt needs web search via Smart Router...")
+            needs_search = await should_search_web(enhanced_message)
+
+        if needs_search:
+            logger.info(f"🔎 Web Search triggered for: {search_query}")
+            try:
+                search_data = await search_web(search_query)
+                search_results = search_data.get("results", [])
+                search_images = search_data.get("images", [])
+
+                if search_results:
+                    context_str = (
+                        "=================================================================\n"
+                        "SYSTEM DIRECTIVE: STRICT FORMATTING REQUIRED FOR WEB RESEARCH\n"
+                        "=================================================================\n"
+                        "You are an AI assistant answering a query using the live internet data provided below.\n"
+                        "YOU MUST OBEY THESE TWO RULES STRICTLY:\n"
+                        "1. You MUST explicitly embed Markdown links to the sources provided below. Use format: `[Source Name](URL)`.\n"
+                    )
+                    
+                    if search_images:
+                        context_str += f"2. You MUST embed this exact image URL at the top of your response: `![Context Image]({search_images[0]})`\n"
+                    else:
+                        context_str += "2. (No images available for this search)\n"
+                        
+                    context_str += "\n--- SEARCH RESULTS ---\n"
+
+                    for res in search_results:
+                        context_str += f"Title: {res['title']}\nURL: {res['url']}\nContent: {res['content']}\n\n"
+                    context_str += "=================================================================\n\n"
+                    
+                    logger.info(f"✅ Web research injected as system context (length: {len(context_str)})")
+            except Exception as e:
+                logger.error(f"Failed to perform web search: {e}")
+
+        # Add messages to pane
+        if needs_search and 'context_str' in locals() and context_str:
+            pane.messages.append(Message(role="system", content=context_str))
+            
+        user_message = Message(
+            role="user", 
+            content=enhanced_message,
+            images=images
+        )
+>>>>>>> 26014c0 (Added RAG search feature)
         pane.messages.append(user_message)
         session_manager.update_session(session)
 
@@ -251,12 +516,44 @@ async def send_chat_message(pane_id: str, request: dict):
         else:
             provider_id = pane.model_info.provider
             model_id = pane.model_info.id
+<<<<<<< HEAD
 
         model_selection = ModelSelection(provider_id=provider_id, model_id=model_id, temperature=0.7, max_tokens=1000)
         broadcast_request = BroadcastRequest(session_id=session_id, prompt=message, images=images, models=[model_selection])
 
         asyncio.create_task(broadcast_orchestrator._stream_to_pane(broadcast_request, model_selection, pane_id, manager))
 
+=======
+            
+        logger.info(f"Creating model selection: provider_id={provider_id}, model_id={model_id}")
+        
+        model_selection = ModelSelection(
+            provider_id=provider_id,
+            model_id=model_id,
+            temperature=0.7,
+            max_tokens=1000
+        )
+        
+        # For individual chat, we need to pass the conversation context differently
+        # Let's just use the new message for now and enhance the broadcast orchestrator later
+        broadcast_request = BroadcastRequest(
+            session_id=session_id,
+            prompt=enhanced_message,
+            images=images,
+            models=[model_selection]
+        )
+        
+        logger.info(f"Starting broadcast to pane {pane_id} with message: {enhanced_message[:50]}...")
+        
+        # Start streaming to existing pane
+        asyncio.create_task(
+            broadcast_orchestrator._stream_to_pane(
+                broadcast_request, model_selection, pane_id, manager
+            )
+        )
+        
+        logger.info(f"Chat message successfully queued for pane {pane_id}")
+>>>>>>> 26014c0 (Added RAG search feature)
         return {"success": True, "pane_id": pane_id}
 
     except Exception as e:
@@ -457,7 +754,20 @@ async def generate_summary(request: SummaryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+<<<<<<< HEAD
 @app.get("/sessions/{session_id}")
+=======
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=5000,
+        reload=False,
+        log_level="info"
+    )
+@app.get(
+"/sessions/{session_id}")
+>>>>>>> 26014c0 (Added RAG search feature)
 async def get_session(session_id: str):
     """Get session details"""
     session = session_manager.get_session(session_id)
