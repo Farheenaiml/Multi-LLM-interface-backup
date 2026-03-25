@@ -27,10 +27,6 @@ export const Workspace: React.FC = () => {
     setAvailableModels,
     updatePaneMessages,
     updatePaneStreaming
-    currentSession, createSession, activePanes, availableModels,
-    isComparing, selectedPanes, setComparing, setSelectedPanes,
-    refreshSessionFromBackend, addPane, addPaneWithId,
-    setAvailableModels, updatePaneMessages
   } = useAppStore();
 
   const [isStreaming, setIsStreaming] = useState(false);
@@ -115,10 +111,6 @@ export const Workspace: React.FC = () => {
 
     // Set streaming state to true to show loading indicator
     updatePaneStreaming(paneId, true);
-    updatePaneMessages(paneId, {
-      id: `msg-${Date.now()}-user`, role: 'user' as const,
-      content: message, images, timestamp: new Date()
-    });
 
     try {
       const response = await fetch(`http://localhost:5000/chat/${paneId}`, {
@@ -213,7 +205,6 @@ export const Workspace: React.FC = () => {
     } catch (error) {
       console.error('❌ Failed to transfer content:', error);
     }
-    setSendToMenuVisible(false);
     setSendToData(null);
   };
 
@@ -239,13 +230,6 @@ export const Workspace: React.FC = () => {
         // Use the action to set streaming for existing panes
         updatePaneStreaming(paneId, true);
       });
-    if (!currentSession) return;
-    paneIds.forEach((paneId, index) => {
-      updatePaneMessages(paneId, {
-        id: `msg-${Date.now()}-${index}-user`, role: 'user' as const,
-        content: prompt, timestamp: new Date()
-      });
-    });
 
       console.log('🚀 Sending messages to existing panes via /chat endpoint');
 
@@ -304,34 +288,17 @@ export const Workspace: React.FC = () => {
           id: `msg-${Date.now()}-${index}-error`,
           role: 'assistant' as const,
           content: `Error: Failed to broadcast message. ${error instanceof Error ? error.message : 'Unknown error'}`,
-    await Promise.all(paneIds.map(async (paneId) => {
-      const pane = activePanes[paneId];
-      if (!pane) return;
-      try {
-        const response = await fetch(`${apiService['baseUrl']}/chat/${paneId}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_id: currentSession.id, message: prompt })
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      } catch (error) {
-        updatePaneMessages(paneId, {
-          id: `msg-${Date.now()}-error-${paneId}`, role: 'assistant' as const,
-          content: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
           timestamp: new Date()
         };
         updatePaneMessages(paneId, errorMessage);
         updatePaneStreaming(paneId, false);
       });
     }
-        });
-      }
-    }));
   };
 
   const handleArrangeWindows = () => (window as any).arrangeWindows?.();
-  const handleMinimizeAll   = () => (window as any).minimizeAllWindows?.();
-  const handleCloseAll      = () => (window as any).closeAllWindows?.();
+  const handleMinimizeAll = () => (window as any).minimizeAllWindows?.();
+  const handleCloseAll = () => (window as any).closeAllWindows?.();
 
   const availablePanes = Object.values(activePanes);
   const panesForComparison = useMemo(() => availablePanes.length > 0 ? availablePanes : [], [availablePanes]);
@@ -376,7 +343,6 @@ export const Workspace: React.FC = () => {
         onClose={() => setArenaVisible(false)}
       />
 
-      {/* ── Floating Model Selector ── */}
       <FloatingModelSelector
         availableModels={availableModels}
         onModelSelect={handleModelSelect}

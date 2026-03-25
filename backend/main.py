@@ -8,29 +8,29 @@ import json
 import logging
 import os
 from datetime import datetime
-from typing import Dict, List, Optional
-from uuid import uuid4
+import sys
+import io
 
-app.include_router(chat_router)
-app.include_router(rag_router)  # Added RAG search feature
+# Force UTF-8 encoding for standard streams to prevent Windows crash on emojis
+if isinstance(sys.stdout, io.TextIOWrapper) and sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+if isinstance(sys.stderr, io.TextIOWrapper) and sys.stderr.encoding.lower() != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8')
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, UploadFile, File, Form, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from dotenv import load_dotenv
+import httpx
 
 # Load environment variables
 load_dotenv()
 
-# RAG Imports
-
-# RAG Imports
-from rag.document_processor import DocumentProcessor
-from rag.vector_store import VectorStore
 
 from models import (
     BroadcastRequest, BroadcastResponse, SendToRequest, SendToResponse,
     SummaryRequest, SummaryResponse, HealthResponse, Session, ChatPane,
-    Message, StreamEvent, ModelSelection, ProvenanceInfo,
-    SearchPrivateRequest, RAGQueryRequest
+    Message, StreamEvent, ModelSelection, ProvenanceInfo
 )
 from adapters.registry import registry
 from broadcast_orchestrator import BroadcastOrchestrator
@@ -38,6 +38,7 @@ from session_manager import SessionManager
 from error_handler import error_handler
 from websocket_manager import connection_manager
 from web_search import search_web, should_search_web
+from knowledge_manager import knowledge_manager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -46,8 +47,8 @@ logger = logging.getLogger(__name__)
 # Debug: Check if API keys are loaded
 google_key = os.getenv("GOOGLE_API_KEY")
 groq_key = os.getenv("GROQ_API_KEY")
-print(f"🔑 Google API Key: {'✅ Loaded' if google_key else '❌ Missing'}")
-print(f"🔑 Groq API Key: {'✅ Loaded' if groq_key else '❌ Missing'}")
+print(f"Google API Key: {'Loaded' if google_key else 'Missing'}")
+print(f"Groq API Key: {'Loaded' if groq_key else 'Missing'}")
 
 app = FastAPI(
     title="Multi-LLM Broadcast Workspace API",
@@ -55,20 +56,6 @@ app = FastAPI(
     version="0.1.0"
 )
 
-# Global RAG Components
-document_processor = None
-vector_store = None
-
-@app.on_event("startup")
-async def startup_event():
-    global document_processor, vector_store
-    try:
-        logger.info("Initializing Private RAG components...")
-        document_processor = DocumentProcessor()
-        vector_store = VectorStore(persist_directory="/tmp/chroma_db", collection_name="private_documents")
-        logger.info("Private RAG components initialized successfully.")
-    except Exception as e:
-        logger.error(f"Failed to initialize Private RAG components: {e}")
 
 # Configure CORS
 app.add_middleware(
@@ -190,157 +177,35 @@ async def health_check():
         return HealthResponse(status="unhealthy", service="multi-llm-broadcast-workspace")
 
 
-# ==========================================
-# PRIVATE RAG ENDPOINTS
-# ==========================================
-
-@app.post("/upload-document")
-async def upload_document(file: UploadFile = File(...)):
-    """
-    Ingest a PDF, DOCX, or TXT file into the Private RAG vector DB.
-    """
-    if not document_processor or not vector_store:
-        raise HTTPException(status_code=503, detail="RAG system is not initialized.")
-        
-    try:
-        content_bytes = await file.read()
-        
-        # 1. Process and extract chunks
-        chunks = await document_processor.ingest_file(file.filename, content_bytes)
-        if not chunks:
-            raise HTTPException(status_code=400, detail="No extractable text found in document.")
-            
-        # 2. Convert and store embeddings
-        metadata = {"filename": file.filename}
-        vector_store.add_documents(chunks, metadata)
-        
-        return {
-            "status": "success",
-            "filename": file.filename,
-            "chunks_processed": len(chunks),
-            "message": "Document uploaded and indexed successfully."
-        }
-    except Exception as e:
-        logger.error(f"Failed to process document {file.filename}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/search-private")
-async def search_private(request: SearchPrivateRequest):
-    """
-    Search the private documents vector DB for relevant context.
-    """
-    if not vector_store:
-        raise HTTPException(status_code=503, detail="RAG system is not initialized.")
-        
-    try:
-        results = vector_store.search_similar(request.query, top_k=request.top_k)
-        return {
-            "query": request.query,
-            "num_results": len(results),
-            "chunks": results
-        }
-    except Exception as e:
-        logger.error(f"Private search failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/rag-query")
-async def rag_query(request: RAGQueryRequest):
-    """
-    Full pipeline: retrieve relevant chunks, stuff them into a prompt context, and query LiteLLM directly.
-    """
-    import httpx
-    
-    if not vector_store:
-        raise HTTPException(status_code=503, detail="RAG system is not initialized.")
-        
-    try:
-        # 1. Retrieve context
-        chunks = vector_store.search_similar(request.query, top_k=4)
-        if not chunks:
-            return {"answer": "I don't have enough information in the provided documents to answer that."}
-            
-        # 2. Prepare Prompt
-        context_str = "\n\n---\n\n".join(chunks)
-        
-        system_prompt = (
-            "You are a helpful assistant. Please answer the user's question using ONLY the provided Context.\n"
-            "If the answer is not contained within the Context, explicitly state 'I cannot answer this based on the provided documents.'"
-        )
-        
-        user_prompt = f"Context:\n{context_str}\n\nQuestion:\n{request.query}\n\nInstructions:\nAnswer only using the provided context."
-        
-        # 3. Query LiteLLM API directly
-        litellm_base = os.getenv("LITELLM_BASE_URL", "http://litellm:8000").rstrip("/")
-        litellm_url = f"{litellm_base}/chat/completions"
-        litellm_key = os.getenv("LITELLM_MASTER_KEY", "sk-1234")
-        
-        payload = {
-            "model": request.model_id,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "temperature": 0.1,
-            "max_tokens": 1024
-        }
-        
-        headers = {
-            "Authorization": f"Bearer {litellm_key}",
-            "Content-Type": "application/json"
-        }
-        
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(litellm_url, json=payload, headers=headers)
-            
-            if resp.status_code != 200:
-                logger.error(f"LiteLLM error: {resp.text}")
-                raise HTTPException(status_code=502, detail="Failed to generate answer from LiteLLM.")
-                
-            data = resp.json()
-            answer = data.get("choices", [{}])[0].get("message", {}).get("content", "Error generating response.")
-            
-            return {
-                "answer": answer,
-                "retrieved_chunks": len(chunks)
-            }
-            
-    except Exception as e:
-        logger.error(f"RAG query failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/broadcast", response_model=BroadcastResponse)
-async def create_broadcast(request: BroadcastRequest):
-    """Create a broadcast request to multiple LLM providers"""
+async def broadcast(request: BroadcastRequest, background_tasks: BackgroundTasks):
+    """Broadcast a prompt to multiple models"""
     try:
-        logger.info(f"Creating broadcast for session {request.session_id} with {len(request.models)} models")
-        print(f"🎯 Broadcast request: {request.models}")
+        logger.info(f"Broadcast request: {request.session_id} with {len(request.models)} models")
+        print(f"Broadcast request: {request.models}")
 
         for model_selection in request.models:
             model_id = f"{model_selection.provider_id}:{model_selection.model_id}"
-            print(f"🔍 Validating model: {model_id}")
+            print(f"Validating model: {model_id}")
             is_valid = await registry.validate_model(model_id)
-            print(f"✅ Model {model_id} valid: {is_valid}")
+            print(f"Model {model_id} valid: {is_valid}")
             if not is_valid:
                 raise HTTPException(status_code=400, detail=f"Invalid model: {model_id}")
 
-        print(f"📝 Creating/getting session: {request.session_id}")
+        print(f"Creating/getting session: {request.session_id}")
         session = session_manager.get_or_create_session(request.session_id)
-        print(f"✅ Session created: {session.id}")
+        print(f"Session created: {session.id}")
 
         pane_ids = []
         user_message_ids = {}
         for model_selection in request.models:
             model_id = f"{model_selection.provider_id}:{model_selection.model_id}"
-            print(f"🔍 Getting model info for: {model_id}")
+            print(f"Getting model info for: {model_id}")
             model_info = await registry.get_model_info(model_id)
-            print(f"📋 Model info: {model_info}")
+            print(f"Model info: {model_info}")
 
             if model_info:
-<<<<<<< HEAD
-                user_message = Message(role="user", content=request.prompt, images=request.images)
-                print(f"📝 Created user message with ID: {user_message.id}")
-                pane = ChatPane(model_info=model_info, messages=[user_message])
-=======
                 # Handle Automatic Smart Search logic
                 enhanced_prompt = request.prompt
                 needs_search = False
@@ -365,15 +230,15 @@ async def create_broadcast(request: BroadcastRequest):
                         if search_results:
                             context_str = (
                                 "=================================================================\n"
-                                "SYSTEM DIRECTIVE: STRICT FORMATTING REQUIRED FOR WEB RESEARCH\n"
+                                "SYSTEM DIRECTIVE: WEB RESEARCH CONTEXT\n"
                                 "=================================================================\n"
                                 "You are an AI assistant answering a query using the live internet data provided below.\n"
-                                "YOU MUST OBEY THESE TWO RULES STRICTLY:\n"
-                                "1. You MUST explicitly embed Markdown links to the sources provided below. Use format: `[Source Name](URL)`.\n"
+                                "Please synthesize this information naturally into your response.\n"
+                                "1. You should cite sources using Markdown links: `[Source Name](URL)`.\n"
                             )
                             
                             if search_images:
-                                context_str += f"2. You MUST embed this exact image URL at the top of your response: `![Context Image]({search_images[0]})`\n"
+                                context_str += f"2. You may optionally include this image at the top of your response if relevant: `![Context Image]({search_images[0]})`\n"
                             else:
                                 context_str += "2. (No images available for this search)\n"
                                 
@@ -392,7 +257,7 @@ async def create_broadcast(request: BroadcastRequest):
                     content=enhanced_prompt,
                     images=request.images
                 )
-                print(f"📝 Created user message with ID: {user_message.id}")
+                print(f"Created user message with ID: {user_message.id}")
                 
                 messages_list = []
                 if needs_search and 'context_str' in locals() and context_str:
@@ -403,13 +268,20 @@ async def create_broadcast(request: BroadcastRequest):
                     model_info=model_info,
                     messages=messages_list
                 )
->>>>>>> 26014c0 (Added RAG search feature)
                 session.panes.append(pane)
                 pane_ids.append(pane.id)
                 user_message_ids[pane.id] = user_message.id
 
         session_manager.update_session(session)
-        asyncio.create_task(broadcast_orchestrator.broadcast(request, pane_ids, manager))
+        asyncio.create_task(broadcast_orchestrator.broadcast(request, pane_ids, connection_manager))
+        # Extract facts from first message
+        session = session_manager.get_session(request.session_id)
+        if session and session.panes and session.panes[0].messages:
+            background_tasks.add_task(
+                knowledge_manager.extract_and_store_facts,
+                session.panes[0].messages.copy(),
+                broadcast_orchestrator.registry
+            )
 
         return BroadcastResponse(
             session_id=request.session_id,
@@ -424,7 +296,7 @@ async def create_broadcast(request: BroadcastRequest):
 
 
 @app.post("/chat/{pane_id}")
-async def send_chat_message(pane_id: str, request: dict):
+async def send_chat_message(pane_id: str, request: dict, background_tasks: BackgroundTasks):
     """Send a message to a specific existing pane"""
     try:
         logger.info(f"Chat request for pane {pane_id}: {request}")
@@ -447,10 +319,6 @@ async def send_chat_message(pane_id: str, request: dict):
 
         logger.info(f"🔍 CHAT REQUEST DEBUG: Model ID: {pane.model_info.id} (Provider: {pane.model_info.provider})")
         images = request.get("images")
-<<<<<<< HEAD
-
-        user_message = Message(role="user", content=message, images=images)
-=======
         if images:
             logger.info(f"🔍 CHAT REQUEST DEBUG: Received {len(images)} images")
             logger.info(f"🔍 CHAT REQUEST DEBUG: Image preview: {images[0][:50]}...")
@@ -476,15 +344,15 @@ async def send_chat_message(pane_id: str, request: dict):
                 if search_results:
                     context_str = (
                         "=================================================================\n"
-                        "SYSTEM DIRECTIVE: STRICT FORMATTING REQUIRED FOR WEB RESEARCH\n"
+                        "SYSTEM DIRECTIVE: WEB RESEARCH CONTEXT\n"
                         "=================================================================\n"
                         "You are an AI assistant answering a query using the live internet data provided below.\n"
-                        "YOU MUST OBEY THESE TWO RULES STRICTLY:\n"
-                        "1. You MUST explicitly embed Markdown links to the sources provided below. Use format: `[Source Name](URL)`.\n"
+                        "Please synthesize this information naturally into your response.\n"
+                        "1. You should cite sources using Markdown links: `[Source Name](URL)`.\n"
                     )
                     
                     if search_images:
-                        context_str += f"2. You MUST embed this exact image URL at the top of your response: `![Context Image]({search_images[0]})`\n"
+                        context_str += f"2. You may optionally include this image at the top of your response if relevant: `![Context Image]({search_images[0]})`\n"
                     else:
                         context_str += "2. (No images available for this search)\n"
                         
@@ -507,7 +375,6 @@ async def send_chat_message(pane_id: str, request: dict):
             content=enhanced_message,
             images=images
         )
->>>>>>> 26014c0 (Added RAG search feature)
         pane.messages.append(user_message)
         session_manager.update_session(session)
 
@@ -516,14 +383,6 @@ async def send_chat_message(pane_id: str, request: dict):
         else:
             provider_id = pane.model_info.provider
             model_id = pane.model_info.id
-<<<<<<< HEAD
-
-        model_selection = ModelSelection(provider_id=provider_id, model_id=model_id, temperature=0.7, max_tokens=1000)
-        broadcast_request = BroadcastRequest(session_id=session_id, prompt=message, images=images, models=[model_selection])
-
-        asyncio.create_task(broadcast_orchestrator._stream_to_pane(broadcast_request, model_selection, pane_id, manager))
-
-=======
             
         logger.info(f"Creating model selection: provider_id={provider_id}, model_id={model_id}")
         
@@ -548,12 +407,18 @@ async def send_chat_message(pane_id: str, request: dict):
         # Start streaming to existing pane
         asyncio.create_task(
             broadcast_orchestrator._stream_to_pane(
-                broadcast_request, model_selection, pane_id, manager
+                broadcast_request, model_selection, pane_id, connection_manager
             )
         )
         
+        # Trigger Knowledge Vault background extraction
+        background_tasks.add_task(
+            knowledge_manager.extract_and_store_facts,
+            pane.messages.copy(), 
+            broadcast_orchestrator.registry
+        )
+        
         logger.info(f"Chat message successfully queued for pane {pane_id}")
->>>>>>> 26014c0 (Added RAG search feature)
         return {"success": True, "pane_id": pane_id}
 
     except Exception as e:
@@ -754,20 +619,7 @@ async def generate_summary(request: SummaryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-<<<<<<< HEAD
 @app.get("/sessions/{session_id}")
-=======
-if __name__ == "__main__":
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=5000,
-        reload=False,
-        log_level="info"
-    )
-@app.get(
-"/sessions/{session_id}")
->>>>>>> 26014c0 (Added RAG search feature)
 async def get_session(session_id: str):
     """Get session details"""
     session = session_manager.get_session(session_id)
@@ -943,6 +795,6 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=5000,
-        reload=True,
+        reload=False,
         log_level="info"
     )

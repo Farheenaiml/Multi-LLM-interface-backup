@@ -78,9 +78,9 @@ async def should_search_web(prompt: str) -> bool:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={google_api_key}"
     
     system_instruction = (
-        "You are an intent classifier. Determine if the user's prompt requires live, recent, or factual data from the internet.\n"
-        "Return EXACTLY 'true' if the prompt contains words like 'news', 'latest', 'today', 'current', 'recent', or asks for factual information, current events, or real-time data that an LLM might not know.\n"
-        "Return EXACTLY 'false' ONLY if it is a general coding question, greeting, translation, creative writing, or relies entirely on general knowledge."
+        "You are an intent classifier. Determine if the user's prompt strongly requires live, recent, or specifically obscure data from the internet.\n"
+        "Return EXACTLY 'true' if the prompt contains words like 'news', 'latest', 'today', 'current', 'recent', or asks for highly current events.\n"
+        "Return EXACTLY 'false' if it is a general coding question, greeting, translation, creative writing, dictionary definition (like 'what is velocity'), or relies entirely on general or encyclopedic knowledge."
     )
     
     payload = {

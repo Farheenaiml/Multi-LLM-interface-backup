@@ -23,14 +23,7 @@ class MessageMetadata(BaseModel):
     latency: Optional[int] = None
     extra: Dict[str, Any] = Field(default_factory=dict)
 
-# RAG Feature Models
-class SearchPrivateRequest(BaseModel):
-    query: str
-    top_k: int = 4
 
-class RAGQueryRequest(BaseModel):
-    query: str
-    model_id: str = "google/gemini-2.5-pro"  # Default LiteLLM format model ID
 
 
 class Message(BaseModel):

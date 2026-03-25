@@ -7,9 +7,3 @@ httpx==0.25.2
 python-dotenv==1.0.0
 pytest==7.4.3
 pytest-asyncio==0.21.1
-pypdf
-python-docx
-chromadb
-sentence-transformers
-langchain-text-splitters
-numpy<2.0.0
