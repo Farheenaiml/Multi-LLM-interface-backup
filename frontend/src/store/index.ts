@@ -157,7 +157,12 @@ export interface AppState {
   // Available Models
   availableModels: ModelInfo[];
   
+  // File Metadata
+  sessionFilesMap: Record<string, string>;
+  
   // Actions
+  addSessionFile: (uri: string, name: string) => void;
+  setSessionFilesMap: (map: Record<string, string>) => void;
   createSession: () => void;
   setCurrentSession: (session: Session) => void;
   refreshSessionFromBackend: (sessionId: string) => Promise<void>;
@@ -218,6 +223,19 @@ export const useAppStore = create<AppState>()(
       conversationHistory: [],
       pipelineTemplates: [],
       availableModels: [],
+      sessionFilesMap: {},
+      
+      // File Metadata Actions
+      addSessionFile: (uri, name) => {
+        set((state) => ({
+          sessionFilesMap: { ...state.sessionFilesMap, [uri]: name }
+        }));
+      },
+      setSessionFilesMap: (map) => {
+        set((state) => ({
+          sessionFilesMap: { ...state.sessionFilesMap, ...map }
+        }));
+      },
       
       // Session Actions
       createSession: () => {
@@ -255,6 +273,16 @@ export const useAppStore = create<AppState>()(
       },
 
       refreshSessionFromBackend: async (sessionId: string) => {
+        try {
+          const fileRes = await fetch(`http://localhost:5000/session/${sessionId}/files`);
+          if (fileRes.ok) {
+            const fileData = await fileRes.json();
+            const map: Record<string, string> = {};
+            fileData.files?.forEach((f: any) => { map[f.uri] = f.originalName || f.name; });
+            set((state) => ({ sessionFilesMap: { ...state.sessionFilesMap, ...map } }));
+          }
+        } catch (e) { console.error('Failed to fetch session files map:', e); }
+
         try {
           const { apiService } = await import('../services/api');
           const backendSession = await apiService.getSession(sessionId);

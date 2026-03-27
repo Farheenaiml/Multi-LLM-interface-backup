@@ -1,0 +1,190 @@
+.file-directory-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.file-directory-modal {
+  background: white;
+  border-radius: 8px;
+  width: 90%;
+  max-width: 500px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+}
+
+.file-directory-modal .modal-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid #eee;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.file-directory-modal .modal-header h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: #333;
+}
+
+.file-directory-modal .modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.file-directory-modal .upload-btn-header {
+  padding: 6px 12px;
+  background-color: #28a745;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.file-directory-modal .upload-btn-header:hover {
+  background-color: #218838;
+}
+
+.file-directory-modal .close-btn {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  cursor: pointer;
+  color: #888;
+  display: flex;
+  align-items: center;
+  line-height: 1;
+}
+
+.file-directory-modal .close-btn:hover {
+  color: #333;
+}
+
+.file-directory-modal .modal-content {
+  padding: 20px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.file-directory-modal .file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.file-directory-modal .file-item {
+  display: flex;
+  align-items: center;
+  padding: 10px 15px;
+  border: 1px solid #eee;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  gap: 12px;
+}
+
+.file-directory-modal .file-item:hover {
+  background-color: #f9f9f9;
+}
+
+.file-directory-modal .file-item.selected {
+  border-color: #007bff;
+  background-color: #f0f7ff;
+}
+
+.file-directory-modal .file-icon {
+  font-size: 1.5rem;
+}
+
+.file-directory-modal .file-details {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.file-directory-modal .file-name {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #333;
+}
+
+.file-directory-modal .file-meta {
+  font-size: 0.8rem;
+  color: #888;
+}
+
+.file-directory-modal .modal-footer {
+  padding: 16px 20px;
+  border-top: 1px solid #eee;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 15px;
+}
+
+.file-directory-modal .model-select {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  color: #333;
+  outline: none;
+}
+
+.file-directory-modal .model-select:focus {
+  border-color: #007bff;
+}
+
+.file-directory-modal .selected-count {
+  font-size: 0.9rem;
+  color: #666;
+}
+
+.file-directory-modal .modal-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.file-directory-modal .cancel-btn {
+  padding: 8px 16px;
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.file-directory-modal .confirm-btn {
+  padding: 8px 16px;
+  background: #007bff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.file-directory-modal .confirm-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
+.file-directory-modal .empty-state, .file-directory-modal .loading {
+  text-align: center;
+  padding: 40px 0;
+  color: #666;
+}
