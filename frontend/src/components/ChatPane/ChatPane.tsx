@@ -1,5 +1,7 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { ChatPane as ChatPaneType, Message, SelectedContent } from '../../types';
+import { FileDirectoryModal, FileInfo } from '../FileDirectoryModal';
+import { useAppStore } from '../../store';
 import { MarkdownRenderer } from '../MarkdownRenderer/MarkdownRenderer';
 import './ChatPane.css';
 
@@ -32,6 +34,11 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
   const [isSelectionMode, setIsSelectionMode] = useState(false);
   const [inputMessage, setInputMessage] = useState('');
   const [selectedFiles, setSelectedFiles] = useState<{ url: string; name: string; type: string }[]>([]);
+  const [isDirectoryOpen, setIsDirectoryOpen] = useState(false);
+  const currentSession = useAppStore(state => state.currentSession);
+  const availableModels = useAppStore(state => state.availableModels);
+  const sessionFilesMap = useAppStore(state => state.sessionFilesMap);
+  const addSessionFile = useAppStore(state => state.addSessionFile);
 
   // Track initial scroll to bottom on load
   const [initialScrollDone, setInitialScrollDone] = useState(false);
@@ -124,29 +131,80 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
     onSelectContent?.({ messageIds: [], text: '' });
   };
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && currentSession) {
       const files = Array.from(e.target.files);
-      files.forEach(file => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          if (typeof reader.result === 'string') {
+      for (const file of files) {
+        const formData = new FormData();
+        formData.append('file', file);
+        try {
+          const res = await fetch(`http://localhost:5000/session/${currentSession.id}/upload`, {
+            method: 'POST',
+            body: formData
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const fileName = data.originalName || data.name;
             setSelectedFiles(prev => [...prev, {
-              url: reader.result as string,
-              name: file.name,
-              type: file.type || 'application/octet-stream' // Fallback type
+              url: data.uri,
+              name: fileName,
+              type: data.type
             }]);
+            addSessionFile(data.uri, fileName);
+          } else {
+            console.error('Failed to upload file', await res.text());
           }
-        };
-        reader.readAsDataURL(file);
-      });
-      // Reset input so same file can be selected again if needed (though we just processed it)
+        } catch (error) {
+          console.error('Error uploading file:', error);
+        }
+      }
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
   const handleRemoveFile = (index: number) => {
     setSelectedFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const handleDirectorySelect = (files: FileInfo[]) => {
+    const newFiles = files.map(f => ({
+      url: f.uri,
+      name: f.name,
+      type: f.type
+    }));
+    const existingUrls = new Set(selectedFiles.map(f => f.url));
+    const toAdd = newFiles.filter(f => !existingUrls.has(f.url));
+    setSelectedFiles(prev => [...prev, ...toAdd]);
+  };
+
+  // Direct send handler for files selected from directory with a specific model
+  const handleDirectSend = (modelId: string, files: FileInfo[]) => {
+    const model = availableModels.find(m => m.id === modelId);
+    if (!model) return;
+
+    const fileUrls = files.map(f => f.uri);
+    
+    // If we're sending to the SAME model as this pane, just send it here
+    if (model.id === pane.modelInfo.id && onSendMessage) {
+      onSendMessage(pane.id, '', fileUrls.length > 0 ? fileUrls : undefined);
+    } else {
+      // If sending to a DIFFERENT model, we need help from the parent (Workspace)
+      // For now, if we don't have a global broadcast prop, we'll try to find an existing pane
+      // or just warn that multi-model send from pane isn't fully wired yet.
+      // Re-checking Workspace integration...
+      console.log(`Sending ${files.length} files to ${model.name}`);
+      
+      // We'll pass this up via a new prop or handle it locally if Workspace gives us a handler
+      if ((window as any).broadcastToModel) {
+        (window as any).broadcastToModel(model, '', fileUrls);
+      } else if (onSendMessage) {
+        // Fallback: send to this pane but log it
+        console.warn('Global broadcast not found, falling back to current pane');
+        onSendMessage(pane.id, `[Sent to ${model.name}]`, fileUrls);
+      }
+    }
+    
+    setIsDirectoryOpen(false);
   };
 
   const handleSendMessage = () => {
@@ -214,7 +272,7 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
                     title="Click to open"
                   >
                     <span style={{ fontSize: '24px' }}>📄</span>
-                    <span style={{ fontWeight: 500 }}>{img.split(';')[0].split(':')[1] || 'Document'}</span>
+                    <span style={{ fontWeight: 500 }}>{sessionFilesMap[img] || img.split(';')[0].split(':')[1] || 'Document'}</span>
                   </div>
                 );
               })}
@@ -411,9 +469,17 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
             multiple
           />
           <button
+            className="action-btn secondary directory-trigger-btn"
+            onClick={() => setIsDirectoryOpen(true)}
+            title="Session Files Directory"
+            disabled={pane.isStreaming}
+          >
+            📁
+          </button>
+          <button
             className="action-btn secondary file-upload-btn"
-            onClick={() => fileInputRef.current?.click()}
-            title="Attach image"
+            onClick={() => setIsDirectoryOpen(true)}
+            title="Attach or select from session directory (provides LLM options)"
             disabled={pane.isStreaming}
           >
             📎
@@ -481,6 +547,16 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
           )}
         </div>
       </div>
+
+      {currentSession && (
+        <FileDirectoryModal
+          sessionId={currentSession.id}
+          isOpen={isDirectoryOpen}
+          onClose={() => setIsDirectoryOpen(false)}
+          onSelectFiles={handleDirectorySelect}
+          onSendDirect={handleDirectSend}
+        />
+      )}
     </div>
   );
 };

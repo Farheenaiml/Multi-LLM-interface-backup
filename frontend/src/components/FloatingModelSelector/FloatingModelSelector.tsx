@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import { ModelInfo } from '../../types';
+import { FileDirectoryModal, FileInfo } from '../FileDirectoryModal';
+import { useAppStore } from '../../store';
 import './FloatingModelSelector.css';
 
 export interface FloatingModelSelectorProps {
@@ -19,7 +21,9 @@ export const FloatingModelSelector: React.FC<FloatingModelSelectorProps> = ({
   const [prompt, setPrompt] = useState('');
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
   const [selectedFiles, setSelectedFiles] = useState<{ url: string; name: string; type: string }[]>([]);
+  const [isDirectoryOpen, setIsDirectoryOpen] = useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const currentSession = useAppStore(state => state.currentSession);
 
   // Token estimation function (rough approximation)
   const estimateTokens = (text: string): number => {
@@ -67,28 +71,76 @@ export const FloatingModelSelector: React.FC<FloatingModelSelectorProps> = ({
     setSelectedModels(newSelected);
   };
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && currentSession) {
       const files = Array.from(e.target.files);
-      files.forEach(file => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          if (typeof reader.result === 'string') {
+      for (const file of files) {
+        if (file.size > 15 * 1024 * 1024) {
+          alert(`File ${file.name} exceeds the 15MB limit and will not be uploaded.`);
+          continue;
+        }
+        const formData = new FormData();
+        formData.append('file', file);
+        try {
+          const res = await fetch(`http://localhost:5000/session/${currentSession.id}/upload`, {
+            method: 'POST',
+            body: formData
+          });
+          if (res.ok) {
+            const data = await res.json();
             setSelectedFiles(prev => [...prev, {
-              url: reader.result as string,
-              name: file.name,
-              type: file.type || 'application/octet-stream'
+              url: data.uri,
+              name: data.originalName || data.name,
+              type: data.type
             }]);
+          } else {
+            const errText = await res.text();
+            console.error('Failed to upload file', errText);
+            alert(`File upload failed: ${errText}`);
           }
-        };
-        reader.readAsDataURL(file);
-      });
+        } catch (error) {
+          console.error('Error uploading file:', error);
+          alert(`File upload error: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
   const handleRemoveFile = (index: number) => {
     setSelectedFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const handleDirectorySelect = (files: FileInfo[]) => {
+    const newFiles = files.map(f => ({
+      url: f.uri,
+      name: f.name,
+      type: f.type
+    }));
+    const existingUrls = new Set(selectedFiles.map(f => f.url));
+    const toAdd = newFiles.filter(f => !existingUrls.has(f.url));
+    setSelectedFiles(prev => [...prev, ...toAdd]);
+  };
+
+  // Direct send handler from directory modal
+  const handleDirectSendFromDirectory = (modelId: string, files: FileInfo[]) => {
+    const model = availableModels.find(m => m.id === modelId);
+    if (!model) {
+      console.warn('Model not found for direct send:', modelId);
+      return;
+    }
+    const fileUrls = files.map(f => f.uri);
+    // Use onModelSelect to send prompt (if any) with files to the chosen model
+    if (prompt.trim()) {
+      onModelSelect(model, prompt, fileUrls.length > 0 ? fileUrls : undefined);
+    } else {
+      // Send empty prompt with files
+      onModelSelect(model, '', fileUrls.length > 0 ? fileUrls : undefined);
+    }
+    // Reset UI state
+    setPrompt('');
+    setSelectedFiles([]);
+    setIsDirectoryOpen(false);
   };
 
   const getFileUrls = () => selectedFiles.map(f => f.url);
@@ -195,9 +247,18 @@ export const FloatingModelSelector: React.FC<FloatingModelSelectorProps> = ({
             multiple
           />
           <button
+            className="expand-btn directory-trigger-btn"
+            onClick={() => setIsDirectoryOpen(true)}
+            title="Session Files Directory"
+            disabled={isStreaming}
+            style={{ marginRight: '8px', background: '#f0f0f0', color: '#666' }}
+          >
+            📁
+          </button>
+          <button
             className="expand-btn file-trigger-btn"
             onClick={() => fileInputRef.current?.click()}
-            title="Attach image"
+            title="Attach new file"
             disabled={isStreaming}
             style={{ marginRight: '8px', background: '#f0f0f0', color: '#666' }}
           >
@@ -359,6 +420,16 @@ export const FloatingModelSelector: React.FC<FloatingModelSelectorProps> = ({
           </div>
           <span>Broadcasting...</span>
         </div>
+      )}
+
+      {currentSession && (
+        <FileDirectoryModal
+          sessionId={currentSession.id}
+          isOpen={isDirectoryOpen}
+          onClose={() => setIsDirectoryOpen(false)}
+          onSelectFiles={handleDirectorySelect}
+          onSendDirect={handleDirectSendFromDirectory}
+        />
       )}
     </div>
   );

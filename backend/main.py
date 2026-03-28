@@ -10,6 +10,8 @@ import os
 from datetime import datetime
 import sys
 import io
+import uuid
+import base64
 
 # Force UTF-8 encoding for standard streams to prevent Windows crash on emojis
 if isinstance(sys.stdout, io.TextIOWrapper) and sys.stdout.encoding.lower() != 'utf-8':
@@ -68,6 +70,8 @@ app.add_middleware(
 
 # Global instances
 session_manager = SessionManager()
+from session_manager import SessionFileManager
+session_file_manager = SessionFileManager()
 broadcast_orchestrator = BroadcastOrchestrator(registry, session_manager)
 manager = connection_manager
 
@@ -251,11 +255,32 @@ async def broadcast(request: BroadcastRequest, background_tasks: BackgroundTasks
                     except Exception as e:
                         logger.error(f"Failed to perform web search: {e}")
                 
+                # Hydrate session files
+                hydrated_images = []
+                if request.images:
+                    for img in request.images:
+                        if img.startswith("session_file:"):
+                            content = session_file_manager.get_file_content(request.session_id, img)
+                            if content:
+                                hydrated_images.append(content)
+                        else:
+                            try:
+                                if img.startswith("data:"):
+                                    header, b64 = img.split(",", 1)
+                                    mime_type = header.split(";", 1)[0].split(":", 1)[1]
+                                    content_bytes = base64.b64decode(b64)
+                                    file_id = str(uuid.uuid4())
+                                    # Cache the new file
+                                    session_file_manager.add_file(request.session_id, file_id, f"auto_{file_id[:8]}", mime_type, content_bytes)
+                            except Exception as e:
+                                logger.error(f"Error auto-caching inline file: {e}")
+                            hydrated_images.append(img)
+
                 # Create user message
                 user_message = Message(
                     role="user", 
                     content=enhanced_prompt,
-                    images=request.images
+                    images=hydrated_images if request.images else None
                 )
                 print(f"Created user message with ID: {user_message.id}")
                 
@@ -319,6 +344,28 @@ async def send_chat_message(pane_id: str, request: dict, background_tasks: Backg
 
         logger.info(f"🔍 CHAT REQUEST DEBUG: Model ID: {pane.model_info.id} (Provider: {pane.model_info.provider})")
         images = request.get("images")
+        
+        hydrated_images = []
+        if images:
+            for img in images:
+                if img.startswith("session_file:"):
+                    content = session_file_manager.get_file_content(session_id, img)
+                    if content:
+                        hydrated_images.append(content)
+                else:
+                    try:
+                        if img.startswith("data:"):
+                            header, b64 = img.split(",", 1)
+                            mime_type = header.split(";", 1)[0].split(":", 1)[1]
+                            content_bytes = base64.b64decode(b64)
+                            file_id = str(uuid.uuid4())
+                            # Cache the new file
+                            session_file_manager.add_file(session_id, file_id, f"auto_{file_id[:8]}", mime_type, content_bytes)
+                    except Exception as e:
+                        logger.error(f"Error auto-caching inline file: {e}")
+                    hydrated_images.append(img)
+            images = hydrated_images
+
         if images:
             logger.info(f"🔍 CHAT REQUEST DEBUG: Received {len(images)} images")
             logger.info(f"🔍 CHAT REQUEST DEBUG: Image preview: {images[0][:50]}...")
@@ -618,6 +665,27 @@ async def generate_summary(request: SummaryRequest):
         logger.error(f"Summarization error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/session/{session_id}/upload")
+async def upload_session_file(session_id: str, file: UploadFile = File(...)):
+    """Upload a file to the current session"""
+    try:
+        content = await file.read()
+        file_id = str(uuid.uuid4())
+        mime_type = file.content_type or "application/octet-stream"
+        file_info = session_file_manager.add_file(session_id, file_id, file.filename, mime_type, content)
+        return file_info
+    except ValueError as e:
+        logger.error(f"Upload error: {e}")
+        raise HTTPException(status_code=413, detail=str(e))
+    except Exception as e:
+        logger.error(f"Upload error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/session/{session_id}/files")
+async def get_session_files(session_id: str):
+    """Get list of files for the current session"""
+    return {"files": session_file_manager.get_files(session_id)}
 
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str):

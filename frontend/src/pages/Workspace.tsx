@@ -22,7 +22,6 @@ export const Workspace: React.FC = () => {
     setComparing,
     setSelectedPanes,
     refreshSessionFromBackend,
-    addPane,
     addPaneWithId,
     setAvailableModels,
     updatePaneMessages,
@@ -93,6 +92,14 @@ export const Workspace: React.FC = () => {
   const handleModelSelect = async (model: ModelInfo, prompt?: string, images?: string[]) => {
     await handleMultiModelSelect([model], prompt || '', images);
   };
+
+  // Expose to window for global access (bridge for components like ChatPane)
+  useEffect(() => {
+    (window as any).broadcastToModel = handleModelSelect;
+    return () => {
+      delete (window as any).broadcastToModel;
+    };
+  }, [handleModelSelect]);
 
   const handleSendMessage = async (paneId: string, message: string, images?: string[]) => {
     if (!currentSession) return;
