@@ -72,8 +72,18 @@ class GoogleDataStudioAdapter(LLMAdapter):
                 data=StatusData(status="connecting", message=f"Connecting to Google {model}")
             )
             
-            # Convert messages to Google format
-            formatted_messages = self._format_messages(messages)
+            # Extract system messages for Google's specific systemInstruction format
+            system_instructions = []
+            conversation_messages = []
+            
+            for msg in messages:
+                if msg.role == "system":
+                    system_instructions.append(msg.content)
+                else:
+                    conversation_messages.append(msg)
+                    
+            # Convert remaining messages to Google format
+            formatted_messages = self._format_messages(conversation_messages)
             
             # Prepare request payload
             payload = {
@@ -84,6 +94,12 @@ class GoogleDataStudioAdapter(LLMAdapter):
                     "candidateCount": 1
                 }
             }
+            
+            if system_instructions:
+                combined_system_text = "\n\n".join(system_instructions)
+                payload["systemInstruction"] = {
+                    "parts": [{"text": combined_system_text}]
+                }
             
             # Use streaming endpoint
             url = f"{self.base_url}/models/{model}:streamGenerateContent"
@@ -321,8 +337,8 @@ class GoogleDataStudioAdapter(LLMAdapter):
         """Return hardcoded working Google models - 3 core models"""
         return [
             ModelInfo(
-                id="gemini-2.5-flash",
-                name="Gemini 2.5 Flash",
+                id="gemini-1.5-flash",
+                name="Gemini 1.5 Flash",
                 provider="google",
                 max_tokens=1048576,
                 cost_per_1k_tokens=0.0007,

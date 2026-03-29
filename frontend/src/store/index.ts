@@ -1,11 +1,11 @@
 import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
-import { 
-  Session, 
-  ChatPane, 
-  ModelInfo, 
-  Message, 
-  TransferContent, 
+import {
+  Session,
+  ChatPane,
+  ModelInfo,
+  Message,
+  TransferContent,
   PaneMetrics,
   ConversationHistory,
   PipelineTemplate,
@@ -44,25 +44,25 @@ class GlobalWebSocketManager {
 
     console.log(`🔌 Creating global WebSocket client for session: ${sessionId}`);
     const client = new WebSocketClient(sessionId);
-    
+
     // Set up event handler
     const eventHandler = (event: StreamEvent) => {
       console.log('Global WebSocket event:', event);
-      
+
       // Update store directly
       const store = useAppStore.getState();
-      
+
       if (event.type === 'token') {
         console.log('🎯 Processing token event for pane:', event.pane_id, 'token:', (event.data as TokenData).token);
-        
+
         // Accumulate tokens into streaming content
         const pane = store.activePanes[event.pane_id];
         if (pane) {
           const lastMessage = pane.messages[pane.messages.length - 1];
-          const currentContent = (lastMessage && lastMessage.role === 'assistant' && lastMessage.id.startsWith('streaming-')) 
-            ? lastMessage.content + (event.data as TokenData).token 
+          const currentContent = (lastMessage && lastMessage.role === 'assistant' && lastMessage.id.startsWith('streaming-'))
+            ? lastMessage.content + (event.data as TokenData).token
             : (event.data as TokenData).token;
-          
+
           store.updateStreamingContent(event.pane_id, currentContent);
           console.log('✅ Token accumulated for pane:', event.pane_id);
         } else {
@@ -71,11 +71,11 @@ class GlobalWebSocketManager {
       } else if (event.type === 'final') {
         console.log('🎯 Processing final event for pane:', event.pane_id, 'content:', (event.data as FinalData).content);
         console.log('🎯 Current active panes:', Object.keys(store.activePanes));
-        
+
         // Finalize the streaming message instead of adding a new one
         const finalData = event.data as FinalData;
         store.finalizeStreamingMessage(event.pane_id, finalData.content, finalData.message_id);
-        
+
         // Check if pane exists and has messages
         const pane = store.activePanes[event.pane_id];
         if (pane) {
@@ -85,7 +85,7 @@ class GlobalWebSocketManager {
         }
       } else if (event.type === 'meter') {
         console.log('🎯 Processing meter event for pane:', event.pane_id, 'data:', event.data);
-        
+
         // Update pane metrics with token count, cost, and latency
         const meterData = event.data as any;
         const metrics = {
@@ -93,15 +93,26 @@ class GlobalWebSocketManager {
           cost: meterData.cost || 0,
           latency: meterData.latency || 0
         };
-        
+
         store.updatePaneMetrics(event.pane_id, metrics);
         console.log('✅ Metrics updated for pane:', event.pane_id, metrics);
+      } else if (event.type === 'error') {
+        console.error('🚨 WebSocket error event received for pane:', event.pane_id, 'data:', event.data);
+        const errorData = event.data as any;
+        const errorMessage = {
+          id: `msg-${Date.now()}-error`,
+          role: 'assistant' as const,
+          content: `⚠️ Error: ${errorData.message || 'Unknown network or model issue. Model might not exist or API is down.'}`,
+          timestamp: new Date()
+        };
+        store.updatePaneMessages(event.pane_id, errorMessage);
+        store.updatePaneStreaming(event.pane_id, false);
       }
     };
 
     client.onEvent(eventHandler);
     this.eventHandlers.set(sessionId, eventHandler);
-    
+
     try {
       await client.connect();
       console.log(`✅ Global WebSocket connected for session: ${sessionId}`);
@@ -137,29 +148,29 @@ export interface AppState {
   // Session Management
   currentSession: Session | null;
   sessions: Session[];
-  
+
   // Global WebSocket Management
   wsManager: GlobalWebSocketManager;
-  
+
   // Pane Management
   activePanes: Record<string, ChatPane>;
   windowManagerState: WindowManagerState;
-  
+
   // UI State
   isComparing: boolean;
   selectedPanes: [string, string] | null;
   metricsVisible: boolean;
-  
+
   // History & Templates
   conversationHistory: ConversationHistory[];
   pipelineTemplates: PipelineTemplate[];
-  
+
   // Available Models
   availableModels: ModelInfo[];
-  
+
   // File Metadata
   sessionFilesMap: Record<string, string>;
-  
+
   // Actions
   addSessionFile: (uri: string, name: string) => void;
   setSessionFilesMap: (map: Record<string, string>) => void;
@@ -175,27 +186,28 @@ export interface AppState {
   finalizeStreamingMessage: (paneId: string, finalContent: string, messageId?: string) => void;
   updatePaneStreaming: (paneId: string, isStreaming: boolean) => void;
   updatePaneMetrics: (paneId: string, metrics: Partial<PaneMetrics>) => void;
+  updatePanePersona: (paneId: string, personaId?: string) => void;
   transferContent: (sourceId: string, targetId: string, content: TransferContent, mode?: 'append' | 'replace' | 'summarize') => void;
-  
+
   // Comparison Actions
   setComparing: (comparing: boolean) => void;
   setSelectedPanes: (panes: [string, string] | null) => void;
-  
+
   // UI Actions
   setMetricsVisible: (visible: boolean) => void;
-  
+
   // Window Manager Actions
   updateWindowManagerState: (state: Partial<WindowManagerState>) => void;
   registerWindow: (paneId: string, window: any) => void;
   unregisterWindow: (paneId: string) => void;
-  
+
   // History Actions
   addToHistory: (history: ConversationHistory) => void;
-  
+
   // Template Actions
   addTemplate: (template: PipelineTemplate) => void;
   removeTemplate: (templateId: string) => void;
-  
+
   // Model Actions
   setAvailableModels: (models: ModelInfo[]) => void;
 }
@@ -224,7 +236,7 @@ export const useAppStore = create<AppState>()(
       pipelineTemplates: [],
       availableModels: [],
       sessionFilesMap: {},
-      
+
       // File Metadata Actions
       addSessionFile: (uri, name) => {
         set((state) => ({
@@ -236,7 +248,7 @@ export const useAppStore = create<AppState>()(
           sessionFilesMap: { ...state.sessionFilesMap, ...map }
         }));
       },
-      
+
       // Session Actions
       createSession: () => {
         const newSession: Session = {
@@ -248,7 +260,7 @@ export const useAppStore = create<AppState>()(
           totalCost: 0,
           status: 'active'
         };
-        
+
         set((state) => ({
           currentSession: newSession,
           sessions: [...state.sessions, newSession]
@@ -267,7 +279,7 @@ export const useAppStore = create<AppState>()(
           console.error(`❌ Failed to initialize WebSocket for session ${sessionId}:`, error);
         }
       },
-      
+
       setCurrentSession: (session) => {
         set({ currentSession: session });
       },
@@ -286,12 +298,12 @@ export const useAppStore = create<AppState>()(
         try {
           const { apiService } = await import('../services/api');
           const backendSession = await apiService.getSession(sessionId);
-          
+
           if (backendSession) {
             // Update the current session with backend data
             set((state) => {
               const updatedActivePanes: { [key: string]: any } = {};
-              
+
               // Convert backend panes to frontend format
               backendSession.panes?.forEach((pane: any) => {
                 updatedActivePanes[pane.id] = {
@@ -302,7 +314,7 @@ export const useAppStore = create<AppState>()(
                   metrics: pane.metrics || { tokenCount: 0, cost: 0, latency: 0 }
                 };
               });
-              
+
               return {
                 ...state,
                 currentSession: {
@@ -317,14 +329,14 @@ export const useAppStore = create<AppState>()(
                 activePanes: updatedActivePanes
               };
             });
-            
+
             console.log(`✅ Session refreshed from backend: ${sessionId}`);
           }
         } catch (error) {
           console.error(`❌ Failed to refresh session from backend: ${error}`);
         }
       },
-      
+
       // Pane Actions
       addPane: (modelInfo) => {
         const paneId = generateId();
@@ -340,14 +352,14 @@ export const useAppStore = create<AppState>()(
             requestCount: 0
           }
         };
-        
+
         set((state) => ({
           activePanes: {
             ...state.activePanes,
             [paneId]: newPane
           }
         }));
-        
+
         // Update current session if exists
         const currentSession = get().currentSession;
         if (currentSession) {
@@ -356,10 +368,10 @@ export const useAppStore = create<AppState>()(
             panes: [...currentSession.panes, newPane],
             updatedAt: new Date()
           };
-          
+
           set((state) => ({
             currentSession: updatedSession,
-            sessions: state.sessions.map(s => 
+            sessions: state.sessions.map(s =>
               s.id === currentSession.id ? updatedSession : s
             )
           }));
@@ -380,14 +392,14 @@ export const useAppStore = create<AppState>()(
             requestCount: 0
           }
         };
-        
+
         set((state) => ({
           activePanes: {
             ...state.activePanes,
             [paneId]: newPane
           }
         }));
-        
+
         // Update current session if exists
         const currentSession = get().currentSession;
         if (currentSession) {
@@ -396,22 +408,22 @@ export const useAppStore = create<AppState>()(
             panes: [...currentSession.panes, newPane],
             updatedAt: new Date()
           };
-          
+
           set((state) => ({
             currentSession: updatedSession,
-            sessions: state.sessions.map(s => 
+            sessions: state.sessions.map(s =>
               s.id === updatedSession.id ? updatedSession : s
             )
           }));
         }
       },
-      
+
       removePane: (paneId) => {
         set((state) => {
           const { [paneId]: removed, ...remainingPanes } = state.activePanes;
           return { activePanes: remainingPanes };
         });
-        
+
         // Update current session
         const currentSession = get().currentSession;
         if (currentSession) {
@@ -420,16 +432,16 @@ export const useAppStore = create<AppState>()(
             panes: currentSession.panes.filter(p => p.id !== paneId),
             updatedAt: new Date()
           };
-          
+
           set((state) => ({
             currentSession: updatedSession,
-            sessions: state.sessions.map(s => 
+            sessions: state.sessions.map(s =>
               s.id === currentSession.id ? updatedSession : s
             )
           }));
         }
       },
-      
+
       updatePaneMessages: (paneId, message) => {
         set((state) => {
           const pane = state.activePanes[paneId];
@@ -437,16 +449,16 @@ export const useAppStore = create<AppState>()(
             console.log('❌ Pane not found for ID:', paneId, 'Available panes:', Object.keys(state.activePanes));
             return state;
           }
-          
+
           console.log('✅ Found pane, current messages:', pane.messages.length, 'Adding message:', message.content.substring(0, 50));
-          
+
           const updatedPane = {
             ...pane,
             messages: [...pane.messages, message]
           };
-          
+
           console.log('✅ Updated pane, new message count:', updatedPane.messages.length);
-          
+
           return {
             activePanes: {
               ...state.activePanes,
@@ -464,10 +476,10 @@ export const useAppStore = create<AppState>()(
             console.log('❌ updateStreamingContent: Pane not found for ID:', paneId);
             return state;
           }
-          
+
           const messages = [...pane.messages];
           const lastMessage = messages[messages.length - 1];
-          
+
           if (lastMessage && lastMessage.role === 'assistant' && lastMessage.id.startsWith('streaming-')) {
             // Update existing streaming message
             messages[messages.length - 1] = {
@@ -483,7 +495,7 @@ export const useAppStore = create<AppState>()(
               timestamp: new Date()
             });
           }
-          
+
           return {
             activePanes: {
               ...state.activePanes,
@@ -504,10 +516,10 @@ export const useAppStore = create<AppState>()(
             console.log('❌ finalizeStreamingMessage: Pane not found for ID:', paneId);
             return state;
           }
-          
+
           const messages = [...pane.messages];
           const lastMessage = messages[messages.length - 1];
-          
+
           if (lastMessage && lastMessage.role === 'assistant' && lastMessage.id.startsWith('streaming-')) {
             // Convert streaming message to final message using backend-provided ID
             messages[messages.length - 1] = {
@@ -525,7 +537,7 @@ export const useAppStore = create<AppState>()(
               timestamp: new Date()
             });
           }
-          
+
           return {
             activePanes: {
               ...state.activePanes,
@@ -538,12 +550,12 @@ export const useAppStore = create<AppState>()(
           };
         });
       },
-      
+
       updatePaneStreaming: (paneId, isStreaming) => {
         set((state) => {
           const pane = state.activePanes[paneId];
           if (!pane) return state;
-          
+
           return {
             activePanes: {
               ...state.activePanes,
@@ -552,12 +564,12 @@ export const useAppStore = create<AppState>()(
           };
         });
       },
-      
+
       updatePaneMetrics: (paneId, metrics) => {
         set((state) => {
           const pane = state.activePanes[paneId];
           if (!pane) return state;
-          
+
           return {
             activePanes: {
               ...state.activePanes,
@@ -569,14 +581,28 @@ export const useAppStore = create<AppState>()(
           };
         });
       },
-      
+
+      updatePanePersona: (paneId, personaId) => {
+        set((state) => {
+          const pane = state.activePanes[paneId];
+          if (!pane) return state;
+
+          return {
+            activePanes: {
+              ...state.activePanes,
+              [paneId]: { ...pane, personaId }
+            }
+          };
+        });
+      },
+
       transferContent: (_sourceId, targetId, content, mode = 'append') => {
         set((state) => {
           const targetPane = state.activePanes[targetId];
           if (!targetPane) return state;
-          
+
           let newMessages: Message[];
-          
+
           if (mode === 'replace') {
             // Replace all messages with transferred content
             newMessages = [...content.messages];
@@ -584,12 +610,12 @@ export const useAppStore = create<AppState>()(
             // Append mode (default) - add to existing messages
             newMessages = [...targetPane.messages, ...content.messages];
           }
-          
+
           const updatedPane = {
             ...targetPane,
             messages: newMessages
           };
-          
+
           return {
             activePanes: {
               ...state.activePanes,
@@ -598,28 +624,28 @@ export const useAppStore = create<AppState>()(
           };
         });
       },
-      
+
       // Comparison Actions
       setComparing: (comparing) => {
         set({ isComparing: comparing });
       },
-      
+
       setSelectedPanes: (panes) => {
         set({ selectedPanes: panes });
       },
-      
+
       // UI Actions
       setMetricsVisible: (visible) => {
         set({ metricsVisible: visible });
       },
-      
+
       // Window Manager Actions
       updateWindowManagerState: (newState) => {
         set((state) => ({
           windowManagerState: { ...state.windowManagerState, ...newState }
         }));
       },
-      
+
       registerWindow: (paneId, window) => {
         set((state) => ({
           windowManagerState: {
@@ -628,7 +654,7 @@ export const useAppStore = create<AppState>()(
           }
         }));
       },
-      
+
       unregisterWindow: (paneId) => {
         set((state) => {
           const { [paneId]: removed, ...remainingWindows } = state.windowManagerState.windows;
@@ -640,27 +666,27 @@ export const useAppStore = create<AppState>()(
           };
         });
       },
-      
+
       // History Actions
       addToHistory: (history) => {
         set((state) => ({
           conversationHistory: [...state.conversationHistory, history]
         }));
       },
-      
+
       // Template Actions
       addTemplate: (template) => {
         set((state) => ({
           pipelineTemplates: [...state.pipelineTemplates, template]
         }));
       },
-      
+
       removeTemplate: (templateId) => {
         set((state) => ({
           pipelineTemplates: state.pipelineTemplates.filter(t => t.id !== templateId)
         }));
       },
-      
+
       // Model Actions
       setAvailableModels: (models) => {
         set({ availableModels: models });

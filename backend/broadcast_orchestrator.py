@@ -233,6 +233,27 @@ class BroadcastOrchestrator:
                 else:
                     messages.insert(0, Message(role="system", content=vault_context))
                     
+            # PERSONA INJECTION: Inject the persona system prompt at the very beginning
+            if getattr(request, 'system_prompt', None):
+                messages.insert(0, Message(role="system", content=request.system_prompt))
+                
+            # CONSOLIDATE SYSTEM MESSAGES: Stricter models (Llama 3, Gemini) crash if multiple system prompts exist
+            system_contents = []
+            non_system_messages = []
+            
+            for msg in messages:
+                if msg.role == "system":
+                    system_contents.append(msg.content)
+                else:
+                    non_system_messages.append(msg)
+                    
+            messages = []
+            if system_contents:
+                combined_system_prompt = "\n\n---\n\n".join(system_contents)
+                messages.append(Message(role="system", content=combined_system_prompt))
+                
+            messages.extend(non_system_messages)
+                    
             # Log conversation context for debugging
             logger.info(f"🗨️ Sending {len(messages)} messages to {model_id} (pane: {pane_id})")
             for i, msg in enumerate(messages):
@@ -389,7 +410,6 @@ class BroadcastOrchestrator:
                 )
             )
             
-            # Stream responses with enhanced error handling
             assistant_message = Message(role="assistant", content="")
             
             # Use the streaming method from our custom adapters

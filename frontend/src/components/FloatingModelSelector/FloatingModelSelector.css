@@ -483,3 +483,26 @@
 .file-trigger-btn {
   min-width: 40px;
 }
+
+.global-persona-select {
+  margin-left: auto;
+  margin-right: 12px;
+  background: rgba(0, 0, 0, 0.05);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  color: #333;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  max-width: 140px;
+}
+
+.global-persona-select:focus {
+  outline: none;
+  border-color: #007AFF;
+}
+
+.global-persona-select option {
+  background: white;
+  color: #333;
+}

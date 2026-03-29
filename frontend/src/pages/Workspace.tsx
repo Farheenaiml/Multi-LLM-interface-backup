@@ -7,8 +7,10 @@ import { PaneGrid } from '../components/PaneGrid';
 import { SendToMenu } from '../components/SendToMenu';
 import { DiffViewer } from '../components/DiffViewer/DiffViewer';
 import { CodeCompareArena } from '../components/CodeCompareArena/CodeCompareArena';
+import { PersonaStudio } from '../components/PersonaStudio';
 import { ModelInfo, SelectedContent, TransferContent } from '../types';
 import { apiService } from '../services/api';
+import { usePersonaStore } from '../store/personaStore';
 import './Workspace.css';
 
 export const Workspace: React.FC = () => {
@@ -32,6 +34,7 @@ export const Workspace: React.FC = () => {
   const [sendToMenuVisible, setSendToMenuVisible] = useState(false);
   const [sessionMetricsVisible, setSessionMetricsVisible] = useState(false);
   const [arenaVisible, setArenaVisible] = useState(false);
+  const [personaStudioVisible, setPersonaStudioVisible] = useState(false);
   const [sendToData, setSendToData] = useState<{
     sourcePane: string;
     selectedContent: SelectedContent;
@@ -120,10 +123,15 @@ export const Workspace: React.FC = () => {
     updatePaneStreaming(paneId, true);
 
     try {
+      const personaStore = usePersonaStore.getState();
+      const activePersonaId = pane.personaId || personaStore.globalPersonaId;
+      const activePersona = personaStore.personas.find(p => p.id === activePersonaId);
+      const systemPrompt = activePersona ? activePersona.systemPrompt : undefined;
+
       const response = await fetch(`http://localhost:5000/chat/${paneId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: currentSession.id, message, images })
+        body: JSON.stringify({ session_id: currentSession.id, message, images, system_prompt: systemPrompt })
       });
 
       if (response.ok) {
@@ -144,11 +152,16 @@ export const Workspace: React.FC = () => {
     setIsStreaming(true);
 
     try {
+      const personaStore = usePersonaStore.getState();
+      const activePersona = personaStore.getGlobalPersona();
+      const systemPrompt = activePersona ? activePersona.systemPrompt : undefined;
+
       const response = await fetch('http://localhost:5000/broadcast', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: currentSession.id, prompt, images,
+          system_prompt: systemPrompt,
           models: models.map(model => ({
             provider_id: model.provider, model_id: model.id.includes(":") ? model.id.split(":").slice(1).join(":") : model.id,
             temperature: 0.7, max_tokens: 1000
@@ -336,10 +349,11 @@ export const Workspace: React.FC = () => {
           onCloseAll={handleCloseAll}
           onBroadcastToActive={handleBroadcastToActive}
           onOpenArena={() => setArenaVisible(true)}
+          onOpenPersonaStudio={() => setPersonaStudioVisible(true)}
         />
       </div>
 
-      {/* ── Floating Panels ── */}
+      {/* ── Floating Panels & Modals ── */}
       <FloatingSessionMetrics
         isVisible={sessionMetricsVisible}
         onToggle={() => setSessionMetricsVisible(!sessionMetricsVisible)}
@@ -348,6 +362,11 @@ export const Workspace: React.FC = () => {
       <CodeCompareArena
         isVisible={arenaVisible}
         onClose={() => setArenaVisible(false)}
+      />
+
+      <PersonaStudio
+        isVisible={personaStudioVisible}
+        onClose={() => setPersonaStudioVisible(false)}
       />
 
       <FloatingModelSelector

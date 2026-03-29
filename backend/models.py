@@ -131,6 +131,7 @@ class BroadcastRequest(BaseModel):
     images: Optional[List[str]] = None
     models: List[ModelSelection]
     session_id: str
+    system_prompt: Optional[str] = None
 
 
 class BroadcastResponse(BaseModel):

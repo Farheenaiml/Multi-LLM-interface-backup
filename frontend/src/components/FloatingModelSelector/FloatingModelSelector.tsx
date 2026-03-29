@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ModelInfo } from '../../types';
 import { FileDirectoryModal, FileInfo } from '../FileDirectoryModal';
 import { useAppStore } from '../../store';
+import { usePersonaStore } from '../../store/personaStore';
 import './FloatingModelSelector.css';
 
 export interface FloatingModelSelectorProps {
@@ -24,6 +25,7 @@ export const FloatingModelSelector: React.FC<FloatingModelSelectorProps> = ({
   const [isDirectoryOpen, setIsDirectoryOpen] = useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const currentSession = useAppStore(state => state.currentSession);
+  const { personas, globalPersonaId, setGlobalPersona } = usePersonaStore();
 
   // Token estimation function (rough approximation)
   const estimateTokens = (text: string): number => {
@@ -286,7 +288,20 @@ export const FloatingModelSelector: React.FC<FloatingModelSelectorProps> = ({
         {isExpanded && prompt.trim() && (
           <div className="model-dropdown">
             <div className="dropdown-header">
-              <span>Select Models for: "{prompt.length > 30 ? prompt.substring(0, 30) + '...' : prompt}"</span>
+              <span className="truncate-text">Select Models for: "{prompt.length > 30 ? prompt.substring(0, 30) + '...' : prompt}"</span>
+
+              <select
+                className="global-persona-select"
+                value={globalPersonaId || ''}
+                onChange={(e) => setGlobalPersona(e.target.value || null)}
+                disabled={isStreaming}
+              >
+                <option value="">No Persona (Default AI)</option>
+                {personas.map(p => (
+                  <option key={p.id} value={p.id}>🎭 {p.name}</option>
+                ))}
+              </select>
+
               <div className="selection-controls">
                 <button
                   className="select-all-btn"

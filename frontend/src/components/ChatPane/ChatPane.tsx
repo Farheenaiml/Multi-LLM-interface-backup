@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useState } from 'react';
 import { ChatPane as ChatPaneType, Message, SelectedContent } from '../../types';
 import { FileDirectoryModal, FileInfo } from '../FileDirectoryModal';
 import { useAppStore } from '../../store';
+import { usePersonaStore } from '../../store/personaStore';
 import { MarkdownRenderer } from '../MarkdownRenderer/MarkdownRenderer';
 import './ChatPane.css';
 
@@ -39,6 +40,8 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
   const availableModels = useAppStore(state => state.availableModels);
   const sessionFilesMap = useAppStore(state => state.sessionFilesMap);
   const addSessionFile = useAppStore(state => state.addSessionFile);
+  const updatePanePersona = useAppStore(state => state.updatePanePersona);
+  const { personas } = usePersonaStore();
 
   // Track initial scroll to bottom on load
   const [initialScrollDone, setInitialScrollDone] = useState(false);
@@ -183,7 +186,7 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
     if (!model) return;
 
     const fileUrls = files.map(f => f.uri);
-    
+
     // If we're sending to the SAME model as this pane, just send it here
     if (model.id === pane.modelInfo.id && onSendMessage) {
       onSendMessage(pane.id, '', fileUrls.length > 0 ? fileUrls : undefined);
@@ -193,7 +196,7 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
       // or just warn that multi-model send from pane isn't fully wired yet.
       // Re-checking Workspace integration...
       console.log(`Sending ${files.length} files to ${model.name}`);
-      
+
       // We'll pass this up via a new prop or handle it locally if Workspace gives us a handler
       if ((window as any).broadcastToModel) {
         (window as any).broadcastToModel(model, '', fileUrls);
@@ -203,7 +206,7 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
         onSendMessage(pane.id, `[Sent to ${model.name}]`, fileUrls);
       }
     }
-    
+
     setIsDirectoryOpen(false);
   };
 
@@ -332,6 +335,18 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
             {pane.modelInfo.supportsStreaming && (
               <span className="streaming-support">📡</span>
             )}
+          </div>
+          <div className="pane-persona-selector">
+            <select
+              value={pane.personaId || 'global'}
+              onChange={(e) => updatePanePersona(pane.id, e.target.value === 'global' ? undefined : e.target.value)}
+              className="local-persona-select"
+            >
+              <option value="global">🌍 Global Persona</option>
+              {personas.map(p => (
+                <option key={p.id} value={p.id}>🎭 {p.name}</option>
+              ))}
+            </select>
           </div>
         </div>
 

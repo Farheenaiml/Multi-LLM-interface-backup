@@ -327,6 +327,7 @@ async def send_chat_message(pane_id: str, request: dict, background_tasks: Backg
         logger.info(f"Chat request for pane {pane_id}: {request}")
         session_id = request.get("session_id")
         message = request.get("message")
+        system_prompt = request.get("system_prompt")
 
         if not session_id or not message:
             logger.error(f"Missing required fields: session_id={session_id}, message={bool(message)}")
@@ -446,7 +447,8 @@ async def send_chat_message(pane_id: str, request: dict, background_tasks: Backg
             session_id=session_id,
             prompt=enhanced_message,
             images=images,
-            models=[model_selection]
+            models=[model_selection],
+            system_prompt=system_prompt
         )
         
         logger.info(f"Starting broadcast to pane {pane_id} with message: {enhanced_message[:50]}...")
