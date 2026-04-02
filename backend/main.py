@@ -12,17 +12,26 @@ import re
 import subprocess
 import tempfile
 from datetime import datetime
-from typing import Dict, List, Optional
-from uuid import uuid4
+import sys
+import io
+import uuid
+import base64
 
-import httpx
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException, Depends
+# Force UTF-8 encoding for standard streams to prevent Windows crash on emojis
+if isinstance(sys.stdout, io.TextIOWrapper) and sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+if isinstance(sys.stderr, io.TextIOWrapper) and sys.stderr.encoding.lower() != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8')
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, UploadFile, File, Form, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import uvicorn
 from dotenv import load_dotenv
+import httpx
 
 load_dotenv()
+
 
 from models import (
     BroadcastRequest, BroadcastResponse, SendToRequest, SendToResponse,
@@ -34,22 +43,23 @@ from broadcast_orchestrator import BroadcastOrchestrator
 from session_manager import SessionManager
 from error_handler import error_handler
 from websocket_manager import connection_manager
+from web_search import search_web, should_search_web
+from knowledge_manager import knowledge_manager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 google_key = os.getenv("GOOGLE_API_KEY")
-groq_key   = os.getenv("GROQ_API_KEY")
-judge0_key = os.getenv("JUDGE0_API_KEY", "")   # optional – free tier works without key
+groq_key = os.getenv("GROQ_API_KEY")
 print(f"🔑 Google API Key: {'✅ Loaded' if google_key else '❌ Missing'}")
-print(f"🔑 Groq API Key:   {'✅ Loaded' if groq_key   else '❌ Missing'}")
-print(f"🔑 Judge0 API Key: {'✅ Loaded' if judge0_key  else '⚠️  Missing (using free tier)'}")
+print(f"🔑 Groq API Key: {'✅ Loaded' if groq_key else '❌ Missing'}")
 
 app = FastAPI(
     title="Multi-LLM Broadcast Workspace API",
     description="Backend API for broadcasting prompts to multiple LLM providers",
     version="0.2.0"
 )
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -59,7 +69,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-session_manager       = SessionManager()
+# Global instances
+session_manager = SessionManager()
 broadcast_orchestrator = BroadcastOrchestrator(registry, session_manager)
 manager               = connection_manager
 
@@ -633,32 +644,53 @@ async def health_check():
         return HealthResponse(status="unhealthy", service="multi-llm-broadcast-workspace")
 
 
+
 @app.post("/broadcast", response_model=BroadcastResponse)
 async def create_broadcast(request: BroadcastRequest):
+    """Create a broadcast request to multiple LLM providers"""
     try:
-        logger.info(f"Broadcast for session {request.session_id} with {len(request.models)} models")
+        logger.info(f"Creating broadcast for session {request.session_id} with {len(request.models)} models")
+        print(f"🎯 Broadcast request: {request.models}")
+
         for model_selection in request.models:
             model_id = f"{model_selection.provider_id}:{model_selection.model_id}"
+            print(f"🔍 Validating model: {model_id}")
             is_valid = await registry.validate_model(model_id)
+            print(f"✅ Model {model_id} valid: {is_valid}")
             if not is_valid:
                 raise HTTPException(status_code=400, detail=f"Invalid model: {model_id}")
 
-        session      = session_manager.get_or_create_session(request.session_id)
-        pane_ids     = []
+        print(f"📝 Creating/getting session: {request.session_id}")
+        session = session_manager.get_or_create_session(request.session_id)
+        print(f"✅ Session created: {session.id}")
+
+        pane_ids = []
         user_message_ids = {}
 
         for model_selection in request.models:
-            model_id   = f"{model_selection.provider_id}:{model_selection.model_id}"
+            model_id = f"{model_selection.provider_id}:{model_selection.model_id}"
+            print(f"🔍 Getting model info for: {model_id}")
             model_info = await registry.get_model_info(model_id)
+            print(f"📋 Model info: {model_info}")
+
             if model_info:
                 user_message = Message(role="user", content=request.prompt, images=request.images)
+                print(f"📝 Created user message with ID: {user_message.id}")
                 pane = ChatPane(model_info=model_info, messages=[user_message])
                 session.panes.append(pane)
                 pane_ids.append(pane.id)
                 user_message_ids[pane.id] = user_message.id
 
         session_manager.update_session(session)
-        asyncio.create_task(broadcast_orchestrator.broadcast(request, pane_ids, manager))
+        asyncio.create_task(broadcast_orchestrator.broadcast(request, pane_ids, connection_manager))
+        # Extract facts from first message
+        session = session_manager.get_session(request.session_id)
+        if session and session.panes and session.panes[0].messages:
+            background_tasks.add_task(
+                knowledge_manager.extract_and_store_facts,
+                session.panes[0].messages.copy(),
+                broadcast_orchestrator.registry
+            )
 
         return BroadcastResponse(
             session_id=request.session_id,
@@ -673,9 +705,11 @@ async def create_broadcast(request: BroadcastRequest):
 
 @app.post("/chat/{pane_id}")
 async def send_chat_message(pane_id: str, request: dict):
+    """Send a message to a specific existing pane"""
     try:
         session_id = request.get("session_id")
-        message    = request.get("message")
+        message = request.get("message")
+
         if not session_id or not message:
             raise HTTPException(status_code=400, detail="Missing session_id or message")
 
@@ -687,7 +721,9 @@ async def send_chat_message(pane_id: str, request: dict):
         if not pane:
             raise HTTPException(status_code=404, detail="Pane not found")
 
-        images       = request.get("images")
+        logger.info(f"🔍 CHAT REQUEST DEBUG: Model ID: {pane.model_info.id} (Provider: {pane.model_info.provider})")
+        images = request.get("images")
+
         user_message = Message(role="user", content=message, images=images)
         pane.messages.append(user_message)
         session_manager.update_session(session)
@@ -696,10 +732,11 @@ async def send_chat_message(pane_id: str, request: dict):
             provider_id, model_id = pane.model_info.id.split(':', 1)
         else:
             provider_id = pane.model_info.provider
-            model_id    = pane.model_info.id
+            model_id = pane.model_info.id
 
-        model_selection   = ModelSelection(provider_id=provider_id, model_id=model_id, temperature=0.7, max_tokens=1000)
+        model_selection = ModelSelection(provider_id=provider_id, model_id=model_id, temperature=0.7, max_tokens=1000)
         broadcast_request = BroadcastRequest(session_id=session_id, prompt=message, images=images, models=[model_selection])
+
         asyncio.create_task(broadcast_orchestrator._stream_to_pane(broadcast_request, model_selection, pane_id, manager))
 
         return {"success": True, "pane_id": pane_id}
@@ -825,6 +862,27 @@ async def generate_summary(request: SummaryRequest):
         logger.error(f"Summarization error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/session/{session_id}/upload")
+async def upload_session_file(session_id: str, file: UploadFile = File(...)):
+    """Upload a file to the current session"""
+    try:
+        content = await file.read()
+        file_id = str(uuid.uuid4())
+        mime_type = file.content_type or "application/octet-stream"
+        file_info = session_file_manager.add_file(session_id, file_id, file.filename, mime_type, content)
+        return file_info
+    except ValueError as e:
+        logger.error(f"Upload error: {e}")
+        raise HTTPException(status_code=413, detail=str(e))
+    except Exception as e:
+        logger.error(f"Upload error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/session/{session_id}/files")
+async def get_session_files(session_id: str):
+    """Get list of files for the current session"""
+    return {"files": session_file_manager.get_files(session_id)}
 
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str):
@@ -964,4 +1022,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=5000, reload=True, log_level="info")
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=5000,
+        reload=True,
+        log_level="info"
+    )

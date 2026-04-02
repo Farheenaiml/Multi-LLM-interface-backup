@@ -15,7 +15,7 @@
   left: 0;
   right: 0;
   bottom: 0;
-  background-image: 
+  background-image:
     radial-gradient(circle at 25% 25%, rgba(255, 255, 255, 0.1) 0%, transparent 50%),
     radial-gradient(circle at 75% 75%, rgba(255, 255, 255, 0.05) 0%, transparent 50%);
   pointer-events: none;
@@ -31,7 +31,8 @@
 
 /* Adjust workspace when comparison is active */
 .workspace-content.comparison-active {
-  padding-right: 420px; /* Make room for the diff viewer */
+  padding-right: 420px;
+  /* Make room for the diff viewer */
 }
 
 /* Responsive adjustment for comparison mode */
@@ -39,7 +40,7 @@
   .workspace-content.comparison-active {
     padding-right: 0;
   }
-  
+
   .diff-viewer {
     position: fixed;
     top: 50%;
@@ -96,7 +97,7 @@
     right: 10px;
     gap: 8px;
   }
-  
+
   .session-metrics-toggle {
     width: 44px;
     height: 44px;
@@ -106,14 +107,14 @@
 
 /* Desktop-style patterns (optional alternatives) */
 .workspace.pattern-dots {
-  background: 
+  background:
     radial-gradient(circle, rgba(255, 255, 255, 0.1) 1px, transparent 1px),
     linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   background-size: 20px 20px, 100% 100%;
 }
 
 .workspace.pattern-grid {
-  background: 
+  background:
     linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px),
     linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -143,7 +144,8 @@
 /* Responsive adjustments */
 @media (max-width: 768px) {
   .workspace {
-    background-attachment: scroll; /* Better performance on mobile */
+    background-attachment: scroll;
+    /* Better performance on mobile */
   }
 }
 
@@ -152,7 +154,7 @@
   .workspace {
     background: #000;
   }
-  
+
   .workspace::before {
     background: none;
   }
@@ -170,7 +172,7 @@
   .workspace {
     background: white !important;
   }
-  
+
   .workspace::before {
     display: none;
   }

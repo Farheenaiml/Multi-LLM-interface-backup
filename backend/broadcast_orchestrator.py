@@ -8,12 +8,10 @@ import logging
 from typing import List, Dict, Any
 from datetime import datetime
 
-from models import (
-    BroadcastRequest, StreamEvent, Message, ModelSelection,
-    ErrorData, StatusData
-)
-from adapters.registry import AdapterRegistry
+from models import BroadcastRequest, ModelSelection, Message, StreamEvent, StatusData, ErrorData
+from adapters.registry import registry, AdapterRegistry
 from session_manager import SessionManager
+from knowledge_manager import knowledge_manager
 from error_handler import error_handler
 
 logger = logging.getLogger(__name__)
@@ -192,15 +190,92 @@ class BroadcastOrchestrator:
             # Get the pane to retrieve conversation history
             pane = next((p for p in session.panes if p.id == pane_id), None)
             if pane and pane.messages:
-                # Include all previous messages for context
-                messages = [
+                # Include all previous messages for context (main.py already appended the latest ones here)
+                all_messages = [
                     Message(role=msg.role, content=msg.content, images=msg.images) 
                     for msg in pane.messages
                 ]
+                
+                # LONG-TERM MEMORY: Rolling Summarization for contexts > 10 messages
+                if len(all_messages) > 10:
+                    recent_messages = all_messages[-10:]
+                    older_messages = all_messages[:-10]
+                    
+                    try:
+                        summary_text = await self._summarize_messages(older_messages, request.session_id, pane_id)
+                        if summary_text:
+                            summary_message = Message(
+                                role="system",
+                                content=f"================ LONG-TERM MEMORY SUMMARY ================\n"
+                                        f"The following is a summary of the older parts of the conversation:\n\n{summary_text}\n"
+                                        f"==========================================================\n"
+                            )
+                            # Prepend the summary to the recent messages
+                            messages = [summary_message] + recent_messages
+                            logger.info(f"🧠 Long-Term Memory: Compressed {len(older_messages)} older messages into a summary.")
+                        else:
+                            messages = all_messages
+                    except Exception as e:
+                        logger.warning(f"Failed to summarize older messages, falling back to full context: {e}")
+                        messages = all_messages
+                else:
+                    messages = all_messages
+            else:
+                # Fallback if pane doesn't have messages yet
+                messages.append(Message(role="user", content=request.prompt, images=request.images))
             
-            # Add the new user message
-            messages.append(Message(role="user", content=request.prompt, images=request.images))
+            # PERSONA INJECTION
+            persona_prompt = getattr(request, 'system_prompt', None)
             
+            # KNOWLEDGE VAULT: Inject global facts into system prompt
+            # If the user selected the Global Persona (no custom persona prompt), we completely disable the Knowledge Vault
+            # so the model cannot possibly hallucinate the user's professional traits.
+            vault_context = knowledge_manager.get_knowledge_context() if persona_prompt else ""
+            
+            if vault_context:
+                # Insert right after any LONG-TERM MEMORY system message, or at index 0
+                if messages and messages[0].role == "system" and "LONG-TERM MEMORY SUMMARY" in messages[0].content:
+                    messages.insert(1, Message(role="system", content=vault_context))
+                else:
+                    messages.insert(0, Message(role="system", content=vault_context))
+                    
+            # EXTRACT SYSTEM AND NON-SYSTEM MESSAGES
+            system_contents = []
+            non_system_messages = []
+            
+            for msg in messages:
+                if msg.role == "system":
+                    # Don't include old persona instructions to avoid confusion mid-chat
+                    if "CURRENT ACTIVE PERSONA" not in msg.content:
+                        system_contents.append(msg.content)
+                else:
+                    non_system_messages.append(msg)
+                    
+            # PERSONA INJECTION
+            persona_prompt = getattr(request, 'system_prompt', None)
+            if not persona_prompt:
+                persona_prompt = "You are a helpful, objective, and general-purpose AI assistant. Provide clear, direct, and factual answers without adopting any specific professional or human persona."
+                
+            persona_block = (
+                "=================================================================\n"
+                "CURRENT ACTIVE PERSONA INSTRUCTIONS\n"
+                "=================================================================\n"
+                f"{persona_prompt}\n\n"
+                "CRITICAL INSTRUCTION: You MUST strictly adhere to this persona for this and all subsequent responses in this chat, ignoring any conflicting previous behavior, traits, or style in the chat history.\n"
+                "================================================================="
+            )
+            
+            # Append persona block at the very end of all system contexts so it has the highest precedence
+            system_contents.append(persona_block)
+                    
+            # CONSOLIDATE SYSTEM MESSAGES: Stricter models crash if multiple system prompts exist
+            messages = []
+            if system_contents:
+                combined_system_prompt = "\n\n---\n\n".join(system_contents)
+                messages.append(Message(role="system", content=combined_system_prompt))
+                
+            messages.extend(non_system_messages)
+                    
             # Log conversation context for debugging
             logger.info(f"🗨️ Sending {len(messages)} messages to {model_id} (pane: {pane_id})")
             for i, msg in enumerate(messages):
@@ -248,8 +323,8 @@ class BroadcastOrchestrator:
 
             # Execute bridge if needed
             if needs_bridge:
-                print(f"🌉 VISION BRIDGE ACTIVATED: {bridge_reason}")
-                logger.info(f"🌉 Vision Bridge Triggered: {bridge_reason}. Handing off to Gemini...")
+                print(f"VISION BRIDGE ACTIVATED: {bridge_reason}")
+                logger.info(f"Vision Bridge Triggered: {bridge_reason}. Handing off to Gemini...")
                 
                 # Notify user of the bridge action
                 status_msg = "Analyzing document..." if has_documents else "Analyzing image..."
@@ -274,22 +349,24 @@ class BroadcastOrchestrator:
                             Message(
                                 role="user", 
                                 content=bridge_prompt,
-                                images=request.images
+                                images=messages[-1].images if messages and messages[-1].images else request.images
                             )
                         ]
                         
-                        description = ""
                         # Stream the description (we just want the final text)
-                        # Use a reliable stable model for analysis (using alias to catch available version)
+                        # Use Gemini 2.5 Flash as the most resilient vision bridge for large PDFs
+                        description = ""
                         async for event in vision_adapter.stream(vision_messages, "gemini-2.5-flash", "temp_vision_pane"):
                             if event.type == "token":
                                 description += event.data.token
                             elif event.type == "final":
                                 description = event.data.content
+                            elif event.type == "error":
+                                raise Exception(event.data.message)
                         
                         if description:
                             # ... (success logic unchanged)
-                            logger.info(f"🌉 Vision Bridge Success: Generated {len(description)} chars context")
+                            logger.info(f"Vision Bridge Success: Generated {len(description)} chars context")
                             
                             # Append description to the LAST message (current user prompt)
                             if messages:
@@ -311,22 +388,23 @@ class BroadcastOrchestrator:
                                 )
                             )
                         else:
-                            logger.warning("🌉 Vision Bridge: Gemini returned empty description")
+                            logger.warning("Vision Bridge: Gemini returned empty description")
                 except Exception as e:
-                    logger.error(f"🌉 Vision Bridge Error: {str(e)}", exc_info=True)
-                    # Notify user of failure but continue
+                    logger.error(f"Vision Bridge Error: {str(e)}", exc_info=True)
+                    # Notify user of hard failure with the exact API error
                     await connection_manager.send_event(
                         request.session_id,
                         StreamEvent(
-                            type="status",
+                            type="error",
                             pane_id=pane_id,
-                            data=StatusData(
-                                status="streaming",
-                                message=f"Document analysis failed, sending raw prompt..."
+                            data=ErrorData(
+                                message=f"Vision Bridge Error: {str(e)}",
+                                code="api_error",
+                                retryable=True
                             )
                         )
                     )
-                    # Continue without description, model will likely fail or say "I can't see"
+                    return # Stop executing Groq if Vision Bridge fails
             # ---------------------------
             
             error_handler._log_structured(
@@ -357,7 +435,6 @@ class BroadcastOrchestrator:
                 )
             )
             
-            # Stream responses with enhanced error handling
             assistant_message = Message(role="assistant", content="")
             
             # Use the streaming method from our custom adapters
@@ -367,8 +444,6 @@ class BroadcastOrchestrator:
                 async for event in adapter.stream(
                     messages, model_selection.model_id, pane_id, **stream_params
                 ):
-                    print(f"🎯 Generated event: {event.type} for pane {pane_id} (model: {model_id})")
-                    
                     # Update session state
                     if event.type == "token":
                         assistant_message.content += event.data.token
@@ -481,3 +556,62 @@ class BroadcastOrchestrator:
                 cancelled = True
         
         return cancelled
+
+    async def _summarize_messages(self, messages: List[Message], session_id: str, pane_id: str) -> str:
+        """Helper function to summarize older conversation history for Long-Term Memory."""
+        try:
+            # Format conversation for summarization
+            conv_text = "\n\n".join([f"{msg.role.upper()}: {msg.content}" for msg in messages if msg.content])
+            
+            # If there's barely any text to summarize, just return it
+            if len(conv_text.strip()) < 50:
+                return conv_text
+                
+            prompt = (
+                "Please provide a highly concise but comprehensive summary of the following conversation history. "
+                "Focus on the main topics discussed, decisions made, and key context that would be important for "
+                "continuing the conversation. Do not include conversational filler.\n\n"
+                f"{conv_text}"
+            )
+            
+            # Try to get a fast/cheap model for summarization
+            # Preferably a Groq model or Gemini Flash Lite
+            provider_id = "groq"
+            model_id = "llama-3.1-8b-instant"
+            adapter = self.registry.get_adapter(provider_id)
+            
+            if not adapter:
+                # Fallback to google
+                provider_id = "google"
+                model_id = "gemini-2.5-flash"
+                adapter = self.registry.get_adapter(provider_id)
+                
+            if not adapter:
+                # No fast provider configured, use whatever is available
+                available_providers = self.registry.list_providers()
+                if available_providers:
+                    provider_id = available_providers[0]
+                    adapter = self.registry.get_adapter(provider_id)
+                    # We would need to know what models it supports, assume Litellm generic or groq generic
+                    model_id = "litellm:gpt-3.5-turbo" if provider_id == "litellm" else "llama-3.1-8b-instant"
+                else:
+                    return "" # No adapter available for summarization
+                
+            summary_messages = [Message(role="user", content=prompt)]
+            summary_content = ""
+            
+            logger.info(f"🧠 Long-Term Memory: Delegating summarization to {provider_id}:{model_id}")
+            async for event in adapter.stream(
+                summary_messages, model_id, f"memory-summary-{pane_id}",
+                temperature=0.3, max_tokens=1000
+            ):
+                if event.type == "token":
+                    summary_content += event.data.token
+                elif event.type == "final":
+                    summary_content = event.data.content
+                    break
+                    
+            return summary_content.strip()
+        except Exception as e:
+            logger.error(f"Error in Long-Term Memory summarization: {e}")
+            return ""

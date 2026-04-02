@@ -24,6 +24,8 @@ class MessageMetadata(BaseModel):
     extra: Dict[str, Any] = Field(default_factory=dict)
 
 
+
+
 class Message(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     role: Literal["user", "assistant", "system"]
@@ -129,6 +131,7 @@ class BroadcastRequest(BaseModel):
     images: Optional[List[str]] = None
     models: List[ModelSelection]
     session_id: str
+    system_prompt: Optional[str] = None
 
 
 class BroadcastResponse(BaseModel):

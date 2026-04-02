@@ -4,6 +4,9 @@ Manages active sessions, panes, and conversation history
 """
 
 import logging
+import os
+import json
+import base64
 from datetime import datetime
 from typing import Dict, List, Optional
 from uuid import uuid4
@@ -305,3 +308,124 @@ class SessionManager:
         
         logger.info(f"Restored session: {session_id}")
         return True
+
+
+class SessionFileManager:
+    """
+    Manages uploaded files scoped to a particular session.
+    Enforces maximum file sizes and total session size constraints.
+    """
+    def __init__(self, storage_dir=".session_files"):
+        self.storage_dir = storage_dir
+        os.makedirs(self.storage_dir, exist_ok=True)
+        self.MAX_FILE_SIZE = 15 * 1024 * 1024 # 15 MB
+        self.MAX_SESSION_SIZE = 50 * 1024 * 1024 * 1024 # 50 GB
+    
+    def _get_session_dir(self, session_id: str) -> str:
+        d = os.path.join(self.storage_dir, session_id)
+        os.makedirs(d, exist_ok=True)
+        return d
+        
+    def _get_session_size(self, session_id: str) -> int:
+        d = self._get_session_dir(session_id)
+        total_size = 0
+        for f in os.listdir(d):
+            if f != "metadata.json":
+                total_size += os.path.getsize(os.path.join(d, f))
+        return total_size
+        
+    def _get_overall_storage_size(self) -> int:
+        total_size = 0
+        for dirpath, dirnames, filenames in os.walk(self.storage_dir):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                if not os.path.islink(fp):
+                    total_size += os.path.getsize(fp)
+        return total_size
+
+    def _get_metadata(self, session_id: str) -> dict:
+        d = self._get_session_dir(session_id)
+        meta_file = os.path.join(d, "metadata.json")
+        if os.path.exists(meta_file):
+            try:
+                with open(meta_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Error reading metadata for session {session_id}: {e}")
+                return {}
+        return {}
+        
+    def _save_metadata(self, session_id: str, meta: dict):
+        d = self._get_session_dir(session_id)
+        with open(os.path.join(d, "metadata.json"), 'w', encoding='utf-8') as f:
+            json.dump(meta, f)
+
+    def add_file(self, session_id: str, file_id: str, name: str, mime_type: str, content: bytes) -> dict:
+        size = len(content)
+        if size > self.MAX_FILE_SIZE:
+            raise ValueError(f"File {name} exceeds the 15MB limit")
+            
+        current_len = self._get_overall_storage_size()
+        if current_len + size > self.MAX_SESSION_SIZE:
+            raise ValueError("Overall limit of 50GB exceeded for file uploading")
+            
+        d = self._get_session_dir(session_id)
+        
+        base, extension = os.path.splitext(name)
+        new_filename = name
+        counter = 1
+        while os.path.exists(os.path.join(d, new_filename)):
+            if counter > 500:
+                from uuid import uuid4
+                new_filename = f"{base}_{str(uuid4())[:8]}{extension}"
+                break
+            new_filename = f"{base}_{counter}{extension}"
+            counter += 1
+            
+        file_path = os.path.join(d, new_filename)
+        
+        with open(file_path, "wb") as f:
+            f.write(content)
+            
+        meta = self._get_metadata(session_id)
+        file_info = {
+            "id": file_id,
+            "name": new_filename,
+            "originalName": name, # Store original name explicitly
+            "type": mime_type,
+            "size": size,
+            "uri": f"session_file:{file_id}",
+            "disk_filename": new_filename
+        }
+        meta[file_id] = file_info
+        self._save_metadata(session_id, meta)
+        
+        return file_info
+
+    def get_files(self, session_id: str) -> list:
+        meta = self._get_metadata(session_id)
+        return list(meta.values())
+        
+    def get_file_content(self, session_id: str, file_uri: str) -> str:
+        # file_uri is like "session_file:123"
+        try:
+            file_id = file_uri.split(":", 1)[1]
+            meta = self._get_metadata(session_id)
+            if file_id not in meta:
+                return None
+                
+            file_info = meta[file_id]
+            disk_filename = file_info.get("disk_filename", file_id)
+            file_path = os.path.join(self.storage_dir, session_id, disk_filename)
+            if not os.path.exists(file_path):
+                file_path = os.path.join(self.storage_dir, session_id, file_id) # fallback
+            if not os.path.exists(file_path):
+                return None
+                
+            with open(file_path, "rb") as f:
+                content = f.read()
+                
+            return f"data:{file_info['type']};base64,{base64.b64encode(content).decode('utf-8')}"
+        except Exception as e:
+            logger.error(f"Error retrieving file content: {e}")
+            return None

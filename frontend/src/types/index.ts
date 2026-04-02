@@ -46,6 +46,7 @@ export interface ChatPane {
   messages: Message[];
   isStreaming: boolean;
   metrics: PaneMetrics;
+  personaId?: string; // Add persona override
 }
 
 export interface PaneMetrics {

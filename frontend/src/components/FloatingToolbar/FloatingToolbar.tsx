@@ -12,6 +12,7 @@ export interface FloatingToolbarProps {
   onCloseAll: () => void;
   onBroadcastToActive?: (paneIds: string[], prompt: string) => void;
   onOpenArena?: () => void;
+  onOpenPersonaStudio?: () => void;
 }
 
 export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
@@ -23,7 +24,8 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
   onMinimizeAll,
   onCloseAll,
   onBroadcastToActive,
-  onOpenArena
+  onOpenArena,
+  onOpenPersonaStudio
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [showCompareSelector, setShowCompareSelector] = useState(false);
@@ -156,6 +158,18 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
               <button className="menu-item broadcast" onClick={handleBroadcastStart} disabled={paneCount === 0}>
                 <span className="item-icon">📡</span>
                 <span className="item-text">Broadcast</span>
+              </button>
+            </div>
+
+            {/* AI Settings */}
+            <div className="menu-section">
+              <div className="section-title">AI Settings</div>
+              <button
+                className="menu-item"
+                onClick={() => { setIsExpanded(false); onOpenPersonaStudio?.(); }}
+              >
+                <span className="item-icon">🎭</span>
+                <span className="item-text">Persona Studio</span>
               </button>
             </div>
 

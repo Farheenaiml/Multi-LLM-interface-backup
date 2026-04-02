@@ -7,22 +7,39 @@ import { PaneGrid } from '../components/PaneGrid';
 import { SendToMenu } from '../components/SendToMenu';
 import { DiffViewer } from '../components/DiffViewer/DiffViewer';
 import { CodeCompareArena } from '../components/CodeCompareArena/CodeCompareArena';
+import { PersonaStudio } from '../components/PersonaStudio';
 import { ModelInfo, SelectedContent, TransferContent } from '../types';
 import { apiService } from '../services/api';
+import { usePersonaStore } from '../store/personaStore';
 import './Workspace.css';
 
 export const Workspace: React.FC = () => {
   const {
+    currentSession,
+    createSession,
+    activePanes,
+    availableModels,
+    isComparing,
+    selectedPanes,
+    setComparing,
+    setSelectedPanes,
+    refreshSessionFromBackend,
+    addPane,
+    addPaneWithId,
+    setAvailableModels,
+    updatePaneMessages,
+    updatePaneStreaming
     currentSession, createSession, activePanes, availableModels,
     isComparing, selectedPanes, setComparing, setSelectedPanes,
     refreshSessionFromBackend, addPane, addPaneWithId,
-    setAvailableModels, updatePaneMessages, updatePaneStreaming
+    setAvailableModels, updatePaneMessages
   } = useAppStore();
 
   const [isStreaming, setIsStreaming] = useState(false);
   const [sendToMenuVisible, setSendToMenuVisible] = useState(false);
   const [sessionMetricsVisible, setSessionMetricsVisible] = useState(false);
   const [arenaVisible, setArenaVisible] = useState(false);
+  const [personaStudioVisible, setPersonaStudioVisible] = useState(false);
   const [sendToData, setSendToData] = useState<{
     sourcePane: string;
     selectedContent: SelectedContent;
@@ -41,9 +58,7 @@ export const Workspace: React.FC = () => {
       console.warn('⚠️ Using fallback models');
       setAvailableModels([
         { id: 'google:gemini-2.5-flash', name: 'Gemini 2.5 Flash', provider: 'google', maxTokens: 1048576, costPer1kTokens: 0.0007, supportsStreaming: true },
-        { id: 'google:gemini-2.0-flash', name: 'Gemini 2.0 Flash', provider: 'google', maxTokens: 1048576, costPer1kTokens: 0.0001, supportsStreaming: true },
         { id: 'google:gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash Lite', provider: 'google', maxTokens: 1048576, costPer1kTokens: 0.000075, supportsStreaming: true },
-        { id: 'google:gemini-1.5-flash', name: 'Gemini 1.5 Flash', provider: 'google', maxTokens: 1048576, costPer1kTokens: 0.000075, supportsStreaming: true },
         { id: 'groq:llama-3.1-8b-instant', name: 'Llama 3.1 8B Instant', provider: 'groq', maxTokens: 8192, costPer1kTokens: 0.0001, supportsStreaming: true },
         { id: 'groq:llama-3.3-70b-versatile', name: 'Llama 3.3 70B Versatile', provider: 'groq', maxTokens: 32768, costPer1kTokens: 0.0005, supportsStreaming: true },
         { id: 'groq:qwen-qwq-32b', name: 'Qwen 3 32B', provider: 'groq', maxTokens: 32768, costPer1kTokens: 0.0008, supportsStreaming: true },
@@ -83,22 +98,46 @@ export const Workspace: React.FC = () => {
     await handleMultiModelSelect([model], prompt || '', images);
   };
 
+  // Expose to window for global access (bridge for components like ChatPane)
+  useEffect(() => {
+    (window as any).broadcastToModel = handleModelSelect;
+    return () => {
+      delete (window as any).broadcastToModel;
+    };
+  }, [handleModelSelect]);
+
   const handleSendMessage = async (paneId: string, message: string, images?: string[]) => {
     if (!currentSession) return;
     const pane = activePanes[paneId];
     if (!pane) return;
 
+    // Add user message to pane
+    const userMessage = {
+      id: `msg-${Date.now()}-user`,
+      role: 'user' as const,
+      content: message,
+      images: images,
+      timestamp: new Date()
+    };
+    updatePaneMessages(paneId, userMessage);
+
+    // Set streaming state to true to show loading indicator
+    updatePaneStreaming(paneId, true);
     updatePaneMessages(paneId, {
       id: `msg-${Date.now()}-user`, role: 'user' as const,
       content: message, images, timestamp: new Date()
     });
-    updatePaneStreaming(paneId, true);
 
     try {
+      const personaStore = usePersonaStore.getState();
+      const activePersonaId = pane.personaId || personaStore.globalPersonaId;
+      const activePersona = personaStore.personas.find(p => p.id === activePersonaId);
+      const systemPrompt = activePersona ? activePersona.systemPrompt : undefined;
+
       const response = await fetch(`http://localhost:5000/chat/${paneId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: currentSession.id, message, images })
+        body: JSON.stringify({ session_id: currentSession.id, message, images, system_prompt: systemPrompt })
       });
       if (!response.ok) {
         console.error('Failed to send message:', response.statusText);
@@ -115,11 +154,16 @@ export const Workspace: React.FC = () => {
     setIsStreaming(true);
 
     try {
+      const personaStore = usePersonaStore.getState();
+      const activePersona = personaStore.getGlobalPersona();
+      const systemPrompt = activePersona ? activePersona.systemPrompt : undefined;
+
       const response = await fetch('http://localhost:5000/broadcast', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: currentSession.id, prompt, images,
+          system_prompt: systemPrompt,
           models: models.map(model => ({
             provider_id: model.provider,
             model_id: model.id.includes(':') ? model.id.split(':').slice(1).join(':') : model.id,
@@ -184,21 +228,96 @@ export const Workspace: React.FC = () => {
     } catch (error) {
       console.error('❌ Failed to transfer content:', error);
     }
-    setSendToMenuVisible(false);
     setSendToData(null);
   };
 
   const handleBroadcastToActive = async (paneIds: string[], prompt: string) => {
-    if (!currentSession) return;
+    console.log(`Broadcasting to ${paneIds.length} active panes:`, paneIds);
 
+    if (!currentSession) {
+      console.error('No current session for broadcast');
+      return;
+    }
+
+    try {
+      // Add user message to selected panes first
+      paneIds.forEach((paneId, index) => {
+        const userMessage = {
+          id: `msg-${Date.now()}-${index}-user`,
+          role: 'user' as const,
+          content: prompt,
+          timestamp: new Date()
+        };
+        updatePaneMessages(paneId, userMessage);
+
+        // Use the action to set streaming for existing panes
+        updatePaneStreaming(paneId, true);
+      });
+    if (!currentSession) return;
     paneIds.forEach((paneId, index) => {
       updatePaneMessages(paneId, {
         id: `msg-${Date.now()}-${index}-user`, role: 'user' as const,
         content: prompt, timestamp: new Date()
       });
-      updatePaneStreaming(paneId, true);
     });
 
+      console.log('🚀 Sending messages to existing panes via /chat endpoint');
+
+      // Send to each existing pane using the /chat/{pane_id} endpoint
+      const chatPromises = paneIds.map(async (paneId) => {
+        const pane = activePanes[paneId];
+        if (!pane) {
+          console.error(`Pane not found: ${paneId}`);
+          return;
+        }
+
+        try {
+          const response = await fetch(`${apiService['baseUrl']}/chat/${paneId}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              session_id: currentSession.id,
+              message: prompt
+            })
+          });
+
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+
+          const result = await response.json();
+          console.log(`✅ Message sent to pane ${paneId}:`, result);
+          return result;
+        } catch (error) {
+          console.error(`❌ Failed to send message to pane ${paneId}:`, error);
+
+          // Add error message to this specific pane
+          const errorMessage = {
+            id: `msg-${Date.now()}-error-${paneId}`,
+            role: 'assistant' as const,
+            content: `Error: Failed to send message. ${error instanceof Error ? error.message : 'Unknown error'}`,
+            timestamp: new Date()
+          };
+          updatePaneMessages(paneId, errorMessage);
+          updatePaneStreaming(paneId, false);
+        }
+      });
+
+      // Wait for all chat requests to complete
+      await Promise.all(chatPromises);
+      console.log('✅ All messages sent to active panes');
+
+    } catch (error) {
+      console.error('❌ Broadcast to active panes failed:', error);
+
+      // Add error messages to all panes if there was a general failure
+      paneIds.forEach((paneId, index) => {
+        const errorMessage = {
+          id: `msg-${Date.now()}-${index}-error`,
+          role: 'assistant' as const,
+          content: `Error: Failed to broadcast message. ${error instanceof Error ? error.message : 'Unknown error'}`,
     await Promise.all(paneIds.map(async (paneId) => {
       const pane = activePanes[paneId];
       if (!pane) return;
@@ -216,13 +335,16 @@ export const Workspace: React.FC = () => {
           timestamp: new Date()
         });
         updatePaneStreaming(paneId, false);
+      });
+    }
+        });
       }
     }));
   };
 
   const handleArrangeWindows = () => (window as any).arrangeWindows?.();
-  const handleMinimizeAll   = () => (window as any).minimizeAllWindows?.();
-  const handleCloseAll      = () => (window as any).closeAllWindows?.();
+  const handleMinimizeAll = () => (window as any).minimizeAllWindows?.();
+  const handleCloseAll = () => (window as any).closeAllWindows?.();
 
   const availablePanes = Object.values(activePanes);
   const panesForComparison = useMemo(() => availablePanes.length > 0 ? availablePanes : [], [availablePanes]);
@@ -248,9 +370,11 @@ export const Workspace: React.FC = () => {
           onCloseAll={handleCloseAll}
           onBroadcastToActive={handleBroadcastToActive}
           onOpenArena={() => setArenaVisible(true)}
+          onOpenPersonaStudio={() => setPersonaStudioVisible(true)}
         />
       </div>
 
+      {/* ── Floating Panels ── */}
       <FloatingSessionMetrics
         isVisible={sessionMetricsVisible}
         onToggle={() => setSessionMetricsVisible(!sessionMetricsVisible)}
@@ -261,6 +385,7 @@ export const Workspace: React.FC = () => {
         onClose={() => setArenaVisible(false)}
       />
 
+      {/* ── Floating Model Selector ── */}
       <FloatingModelSelector
         availableModels={availableModels}
         onModelSelect={handleModelSelect}
