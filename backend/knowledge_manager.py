@@ -39,15 +39,29 @@ class KnowledgeManager:
             return ""
             
         context = (
-            "=================================================================\n"
-            "SYSTEM DIRECTIVE: GLOBAL KNOWLEDGE VAULT\n"
-            "=================================================================\n"
-            "The following facts are permanent, trusted information derived from the user's past cross-model sessions.\n"
-            "You MUST remember this information and use it to better answer the user implicitly.\n\n"
+            "[[SYSTEM METADATA: USER PROFILE REFERENCE]]\n"
+            "Below is a JSON object containing established facts about the user. You may reference these facts ONLY if strictly necessary to answer the user's specific questions about themselves.\n"
+            "DO NOT assume these traits for yourself. You are the AI Assistant. The user is the human described below.\n\n"
+            "```json\n{\n"
+            '  "user": {\n'
+            '    "known_facts": [\n'
         )
+        
+        json_facts = []
         for fact in self.facts:
-            context += f"- {fact}\n"
-        context += "=================================================================\n"
+            # Clean up the facts
+            safe_fact = fact.replace("User is ", "").replace("User has ", "").replace("User ", "").strip()
+            # Double escape quotes
+            safe_fact = safe_fact.replace('"', '\\"')
+            json_facts.append(f'      "{safe_fact}"')
+            
+        context += ",\n".join(json_facts)
+        context += (
+            "\n    ]\n"
+            "  }\n"
+            "}\n```\n"
+            "[[END SYSTEM METADATA]]\n"
+        )
         return context
 
     async def extract_and_store_facts(self, messages: List[Message], registry) -> None:
@@ -78,7 +92,7 @@ class KnowledgeManager:
             model_id = "llama-3.1-8b-instant"
             if not adapter:
                 adapter = registry.get_adapter("google")
-                model_id = "gemini-2.5-flash"
+                model_id = "gemini-flash-latest"
                 
             if not adapter:
                 # No fast provider configured, use whatever is available

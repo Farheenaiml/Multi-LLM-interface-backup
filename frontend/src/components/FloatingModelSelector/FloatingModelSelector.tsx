@@ -90,6 +90,9 @@ export const FloatingModelSelector: React.FC<FloatingModelSelectorProps> = ({
           });
           if (res.ok) {
             const data = await res.json();
+            // Register filename mapping in the store so UI can display it
+            useAppStore.getState().addSessionFile(data.uri, data.originalName || data.name);
+
             setSelectedFiles(prev => [...prev, {
               url: data.uri,
               name: data.originalName || data.name,

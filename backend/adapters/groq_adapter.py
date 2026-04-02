@@ -96,113 +96,127 @@ class GroqAdapter(LLMAdapter):
             token_count = 0
             full_content = ""
             
-            async with self.client.stream(
-                "POST",
-                f"{self.base_url}/chat/completions",
-                json=payload,
-                headers=headers
-            ) as response:
-                
-                if response.status_code != 200:
-                    error_text = await response.aread()
-                    error_content = error_text.decode()
+            max_retries = 3
+            for attempt in range(max_retries):
+                async with self.client.stream(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    json=payload,
+                    headers=headers
+                ) as response:
                     
-                    # Print detailed error information
-                    print(f"🔴 GROQ API ERROR - Status Code: {response.status_code}")
-                    print(f"🔴 Model: {model}")
-                    print(f"🔴 Response Headers: {dict(response.headers)}")
-                    print(f"🔴 Error Content: {error_content[:1000]}")
-                    
-                    error_handler._log_structured(
-                        "error",
-                        f"Groq API error: {response.status_code}",
-                        pane_id=pane_id,
-                        model=model,
-                        status_code=response.status_code,
-                        error_text=error_content[:500]
-                    )
-                    
-                    # Handle specific error codes
-                    if response.status_code == 429:
-                        retry_after = response.headers.get("retry-after", "60")
-                        error_msg = f"Groq Rate Limited (429) - Retry after: {retry_after}s"
-                    elif response.status_code == 403:
-                        error_msg = f"Groq Forbidden (403) - Check API key permissions"
-                    elif response.status_code == 404:
-                        error_msg = f"Groq Not Found (404) - Model '{model}' may not exist"
-                    elif response.status_code == 400:
-                        error_msg = f"Groq Bad Request (400) - Invalid request format"
-                    else:
-                        error_msg = f"Groq API Error ({response.status_code})"
-                    
-                    yield StreamEvent(
-                        type="error",
-                        pane_id=pane_id,
-                        data=ErrorData(
-                            message=error_msg,
-                            code=f"http_{response.status_code}",
-                            retryable=response.status_code >= 500 or response.status_code == 429
-                        )
-                    )
-                    return
-                
-                async for line in response.aiter_lines():
-                    if not line.strip():
+                    if response.status_code == 503 and attempt < max_retries - 1:
+                        import asyncio
+                        wait_time = (attempt + 1) * 2
+                        print(f"Groq API {response.status_code} on attempt {attempt+1}. Retrying in {wait_time}s...")
+                        await asyncio.sleep(wait_time)
                         continue
-                    
-                    if line.startswith("data: "):
-                        data_str = line[6:]  # Remove "data: " prefix
                         
-                        if data_str.strip() == "[DONE]":
-                            break
+                    if response.status_code != 200:
+                        error_text = await response.aread()
+                        error_content = error_text.decode()
                         
-                        try:
-                            data = json.loads(data_str)
+                        # Print detailed error information
+                        print(f"🔴 GROQ API ERROR - Status Code: {response.status_code}")
+                        print(f"🔴 Model: {model}")
+                        print(f"🔴 Response Headers: {dict(response.headers)}")
+                        print(f"🔴 Error Content: {error_content[:1000]}")
+                        
+                        error_handler._log_structured(
+                            "error",
+                            f"Groq API error: {response.status_code}",
+                            pane_id=pane_id,
+                            model=model,
+                            status_code=response.status_code,
+                            error_text=error_content[:500]
+                        )
+                        
+                        # Handle specific error codes
+                        if response.status_code == 429:
+                            retry_after = response.headers.get("retry-after")
+                            if retry_after:
+                                error_msg = f"Groq Rate Limited (429) - Retry after: {retry_after}s"
+                            else:
+                                error_msg = "Groq Rate Limited (429) - Please wait before trying again"
+                        elif response.status_code == 403:
+                            error_msg = f"Groq Forbidden (403) - Check API key permissions"
+                        elif response.status_code == 404:
+                            error_msg = f"Groq Not Found (404) - Model '{model}' may not exist"
+                        elif response.status_code == 400:
+                            error_msg = f"Groq Bad Request (400) - Invalid request format"
+                        else:
+                            error_msg = f"Groq API Error ({response.status_code})"
+                        
+                        yield StreamEvent(
+                            type="error",
+                            pane_id=pane_id,
+                            data=ErrorData(
+                                message=error_msg,
+                                code=f"http_{response.status_code}",
+                                retryable=response.status_code >= 500 or response.status_code == 429
+                            )
+                        )
+                        return
+                
+                    async for line in response.aiter_lines():
+                        if not line.strip():
+                            continue
+                        
+                        if line.startswith("data: "):
+                            data_str = line[6:]  # Remove "data: " prefix
                             
-                            if "choices" in data and len(data["choices"]) > 0:
-                                choice = data["choices"][0]
+                            if data_str.strip() == "[DONE]":
+                                break
+                            
+                            try:
+                                data = json.loads(data_str)
                                 
-                                if "delta" in choice and "content" in choice["delta"]:
-                                    token = choice["delta"]["content"]
-                                    if token:
-                                        full_content += token
-                                        token_count += 1
+                                if "choices" in data and len(data["choices"]) > 0:
+                                    choice = data["choices"][0]
+                                    
+                                    if "delta" in choice and "content" in choice["delta"]:
+                                        token = choice["delta"]["content"]
+                                        if token:
+                                            full_content += token
+                                            token_count += 1
+                                            
+                                            yield StreamEvent(
+                                                type="token",
+                                                pane_id=pane_id,
+                                                data=TokenData(token=token, position=token_count)
+                                            )
+                                    
+                                    # Check for finish reason
+                                    if "finish_reason" in choice and choice["finish_reason"]:
+                                        end_time = datetime.now()
+                                        latency = int((end_time - start_time).total_seconds() * 1000)
                                         
+                                        # Emit final content
                                         yield StreamEvent(
-                                            type="token",
+                                            type="final",
                                             pane_id=pane_id,
-                                            data=TokenData(token=token, position=token_count)
+                                            data=FinalData(
+                                                content=full_content,
+                                                finish_reason=choice["finish_reason"]
+                                            )
                                         )
-                                
-                                # Check for finish reason
-                                if "finish_reason" in choice and choice["finish_reason"]:
-                                    end_time = datetime.now()
-                                    latency = int((end_time - start_time).total_seconds() * 1000)
-                                    
-                                    # Emit final content
-                                    yield StreamEvent(
-                                        type="final",
-                                        pane_id=pane_id,
-                                        data=FinalData(
-                                            content=full_content,
-                                            finish_reason=choice["finish_reason"]
+                                        
+                                        # Emit metrics
+                                        estimated_cost = self._estimate_cost(model, token_count)
+                                        yield StreamEvent(
+                                            type="meter",
+                                            pane_id=pane_id,
+                                            data=MeterData(
+                                                tokens_used=token_count,
+                                                cost=estimated_cost,
+                                                latency=latency
+                                            )
                                         )
-                                    )
-                                    
-                                    # Emit metrics
-                                    estimated_cost = self._estimate_cost(model, token_count)
-                                    yield StreamEvent(
-                                        type="meter",
-                                        pane_id=pane_id,
-                                        data=MeterData(
-                                            tokens_used=token_count,
-                                            cost=estimated_cost,
-                                            latency=latency
-                                        )
-                                    )
-                        
-                        except json.JSONDecodeError:
-                            continue  # Skip malformed JSON
+                            
+                            except json.JSONDecodeError:
+                                continue  # Skip malformed JSON
+                    
+                break # Success, exit retry loop
                 
         except httpx.TimeoutException as e:
             error_handler._log_structured(
@@ -265,11 +279,11 @@ class GroqAdapter(LLMAdapter):
         Get available Groq models - return hardcoded models to avoid API calls.
         """
         if not self.api_key:
-            print("❌ Groq API key not configured")
+            print("Groq API key not configured")
             return []
         
         # Always return fallback models to avoid unnecessary API calls
-        print("✅ Returning Groq fallback models")
+        print("Returning Groq fallback models")
         return self._get_fallback_models()
     
     def _get_chat_model_ids(self) -> Dict[str, str]:
@@ -283,7 +297,7 @@ class GroqAdapter(LLMAdapter):
         }
     
     def _get_fallback_models(self) -> List[ModelInfo]:
-        """Return hardcoded working Groq models - 5 core models"""
+        """Return hardcoded working Groq models"""
         return [
             ModelInfo(
                 id="llama-3.1-8b-instant",
@@ -317,14 +331,6 @@ class GroqAdapter(LLMAdapter):
                 max_tokens=8192,
                 cost_per_1k_tokens=0.0006,
                 supports_streaming=True
-            ),
-            ModelInfo(
-                id="meta-llama/llama-4-maverick-17b-128e-instruct",
-                name="Llama 4 Maverick 17B",
-                provider="groq",
-                max_tokens=8192,
-                cost_per_1k_tokens=0.0008,
-                supports_streaming=True
             )
         ]
     
@@ -344,8 +350,7 @@ class GroqAdapter(LLMAdapter):
             "llama-3.1-8b-instant": 0.0001,
             "qwen/qwen3-32b": 0.0008,
             "openai/gpt-oss-120b": 0.0012,
-            "openai/gpt-oss-20b": 0.0006,
-            "meta-llama/llama-4-maverick-17b-128e-instruct": 0.0008
+            "openai/gpt-oss-20b": 0.0006
         }
         
         return cost_map.get(model, 0.0005)  # Default cost
@@ -359,8 +364,7 @@ class GroqAdapter(LLMAdapter):
             "llama-3.1-8b-instant": 8192,
             "qwen/qwen3-32b": 32768,
             "openai/gpt-oss-120b": 8192,
-            "openai/gpt-oss-20b": 8192,
-            "meta-llama/llama-4-maverick-17b-128e-instruct": 8192
+            "openai/gpt-oss-20b": 8192
         }
         
         return token_map.get(model, 8192)  # Default limit

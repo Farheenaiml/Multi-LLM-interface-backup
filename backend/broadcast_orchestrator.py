@@ -224,8 +224,14 @@ class BroadcastOrchestrator:
                 # Fallback if pane doesn't have messages yet
                 messages.append(Message(role="user", content=request.prompt, images=request.images))
             
+            # PERSONA INJECTION
+            persona_prompt = getattr(request, 'system_prompt', None)
+            
             # KNOWLEDGE VAULT: Inject global facts into system prompt
-            vault_context = knowledge_manager.get_knowledge_context()
+            # If the user selected the Global Persona (no custom persona prompt), we completely disable the Knowledge Vault
+            # so the model cannot possibly hallucinate the user's professional traits.
+            vault_context = knowledge_manager.get_knowledge_context() if persona_prompt else ""
+            
             if vault_context:
                 # Insert right after any LONG-TERM MEMORY system message, or at index 0
                 if messages and messages[0].role == "system" and "LONG-TERM MEMORY SUMMARY" in messages[0].content:
@@ -233,20 +239,36 @@ class BroadcastOrchestrator:
                 else:
                     messages.insert(0, Message(role="system", content=vault_context))
                     
-            # PERSONA INJECTION: Inject the persona system prompt at the very beginning
-            if getattr(request, 'system_prompt', None):
-                messages.insert(0, Message(role="system", content=request.system_prompt))
-                
-            # CONSOLIDATE SYSTEM MESSAGES: Stricter models (Llama 3, Gemini) crash if multiple system prompts exist
+            # EXTRACT SYSTEM AND NON-SYSTEM MESSAGES
             system_contents = []
             non_system_messages = []
             
             for msg in messages:
                 if msg.role == "system":
-                    system_contents.append(msg.content)
+                    # Don't include old persona instructions to avoid confusion mid-chat
+                    if "CURRENT ACTIVE PERSONA" not in msg.content:
+                        system_contents.append(msg.content)
                 else:
                     non_system_messages.append(msg)
                     
+            # PERSONA INJECTION
+            persona_prompt = getattr(request, 'system_prompt', None)
+            if not persona_prompt:
+                persona_prompt = "You are a helpful, objective, and general-purpose AI assistant. Provide clear, direct, and factual answers without adopting any specific professional or human persona."
+                
+            persona_block = (
+                "=================================================================\n"
+                "CURRENT ACTIVE PERSONA INSTRUCTIONS\n"
+                "=================================================================\n"
+                f"{persona_prompt}\n\n"
+                "CRITICAL INSTRUCTION: You MUST strictly adhere to this persona for this and all subsequent responses in this chat, ignoring any conflicting previous behavior, traits, or style in the chat history.\n"
+                "================================================================="
+            )
+            
+            # Append persona block at the very end of all system contexts so it has the highest precedence
+            system_contents.append(persona_block)
+                    
+            # CONSOLIDATE SYSTEM MESSAGES: Stricter models crash if multiple system prompts exist
             messages = []
             if system_contents:
                 combined_system_prompt = "\n\n---\n\n".join(system_contents)
@@ -301,8 +323,8 @@ class BroadcastOrchestrator:
 
             # Execute bridge if needed
             if needs_bridge:
-                print(f"🌉 VISION BRIDGE ACTIVATED: {bridge_reason}")
-                logger.info(f"🌉 Vision Bridge Triggered: {bridge_reason}. Handing off to Gemini...")
+                print(f"VISION BRIDGE ACTIVATED: {bridge_reason}")
+                logger.info(f"Vision Bridge Triggered: {bridge_reason}. Handing off to Gemini...")
                 
                 # Notify user of the bridge action
                 status_msg = "Analyzing document..." if has_documents else "Analyzing image..."
@@ -327,22 +349,24 @@ class BroadcastOrchestrator:
                             Message(
                                 role="user", 
                                 content=bridge_prompt,
-                                images=request.images
+                                images=messages[-1].images if messages and messages[-1].images else request.images
                             )
                         ]
                         
-                        description = ""
                         # Stream the description (we just want the final text)
-                        # Use a reliable stable model for analysis (using alias to catch available version)
+                        # Use Gemini 2.5 Flash as the most resilient vision bridge for large PDFs
+                        description = ""
                         async for event in vision_adapter.stream(vision_messages, "gemini-2.5-flash", "temp_vision_pane"):
                             if event.type == "token":
                                 description += event.data.token
                             elif event.type == "final":
                                 description = event.data.content
+                            elif event.type == "error":
+                                raise Exception(event.data.message)
                         
                         if description:
                             # ... (success logic unchanged)
-                            logger.info(f"🌉 Vision Bridge Success: Generated {len(description)} chars context")
+                            logger.info(f"Vision Bridge Success: Generated {len(description)} chars context")
                             
                             # Append description to the LAST message (current user prompt)
                             if messages:
@@ -364,22 +388,23 @@ class BroadcastOrchestrator:
                                 )
                             )
                         else:
-                            logger.warning("🌉 Vision Bridge: Gemini returned empty description")
+                            logger.warning("Vision Bridge: Gemini returned empty description")
                 except Exception as e:
-                    logger.error(f"🌉 Vision Bridge Error: {str(e)}", exc_info=True)
-                    # Notify user of failure but continue
+                    logger.error(f"Vision Bridge Error: {str(e)}", exc_info=True)
+                    # Notify user of hard failure with the exact API error
                     await connection_manager.send_event(
                         request.session_id,
                         StreamEvent(
-                            type="status",
+                            type="error",
                             pane_id=pane_id,
-                            data=StatusData(
-                                status="streaming",
-                                message=f"Document analysis failed, sending raw prompt..."
+                            data=ErrorData(
+                                message=f"Vision Bridge Error: {str(e)}",
+                                code="api_error",
+                                retryable=True
                             )
                         )
                     )
-                    # Continue without description, model will likely fail or say "I can't see"
+                    return # Stop executing Groq if Vision Bridge fails
             # ---------------------------
             
             error_handler._log_structured(

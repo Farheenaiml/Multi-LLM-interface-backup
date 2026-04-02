@@ -396,7 +396,8 @@ async def send_chat_message(pane_id: str, request: dict, background_tasks: Backg
                         "=================================================================\n"
                         "You are an AI assistant answering a query using the live internet data provided below.\n"
                         "Please synthesize this information naturally into your response.\n"
-                        "1. You should cite sources using Markdown links: `[Source Name](URL)`.\n"
+                        "1. You MUST cite sources using Markdown links with the actual Publisher or Article Title as the clickable text: `[Publisher Name or Title](URL)`.\n"
+                        "2. DO NOT use generic words like 'Source', 'Link', or 'Here' as the clickable text.\n"
                     )
                     
                     if search_images:

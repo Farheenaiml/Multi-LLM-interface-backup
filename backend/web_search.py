@@ -60,7 +60,7 @@ async def search_web(query: str, max_results: int = 5) -> Dict[str, Any]:
 
 async def should_search_web(prompt: str) -> bool:
     """
-    Uses Gemini 2.5 Flash as a fast router to determine if the prompt requires a web search.
+    Uses Groq or Gemini as a fast router to determine if the prompt requires a web search.
     
     Args:
         prompt (str): The user's input prompt.
@@ -69,13 +69,8 @@ async def should_search_web(prompt: str) -> bool:
         bool: True if the prompt requires live internet data, False otherwise.
     """
     import json
-    
-    google_api_key = os.getenv("GOOGLE_API_KEY")
-    if not google_api_key:
-        print("Warning: GOOGLE_API_KEY not found. Defaulting to smart search = False.")
-        return False
-        
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={google_api_key}"
+    from adapters.registry import registry
+    from models import Message
     
     system_instruction = (
         "You are an intent classifier. Determine if the user's prompt strongly requires live, recent, or specifically obscure data from the internet.\n"
@@ -83,32 +78,39 @@ async def should_search_web(prompt: str) -> bool:
         "Return EXACTLY 'false' if it is a general coding question, greeting, translation, creative writing, dictionary definition (like 'what is velocity'), or relies entirely on general or encyclopedic knowledge."
     )
     
-    payload = {
-        "system_instruction": {
-            "parts": [{"text": system_instruction}]
-        },
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }],
-        "generationConfig": {
-            "temperature": 0.0,
-            "maxOutputTokens": 200
-        }
-    }
+    # Try Groq first for speed
+    adapter = registry.get_adapter("groq")
+    model_id = "llama-3.1-8b-instant"
     
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.post(url, json=payload, timeout=5.0)
-            response.raise_for_status()
-            data = response.json()
-            
-            # Extract response text
-            text_response = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip().lower()
-            
-            if "true" in text_response:
-                return True
-            return False
-            
-        except Exception as e:
-            print(f"Smart router failed, defaulting to False: {e}")
-            return False
+    if not adapter:
+        # Fallback to Google
+        adapter = registry.get_adapter("google")
+        model_id = "gemini-flash-latest"
+        
+    if not adapter:
+        print("Warning: Neither Groq nor Google adapters configured for Smart Router. Defaulting to False.")
+        return False
+        
+    messages = [
+        Message(role="system", content=system_instruction),
+        Message(role="user", content=prompt)
+    ]
+    
+    try:
+        output = ""
+        # stream the response
+        async for event in adapter.stream(messages, model_id, "router_pane", temperature=0.0, max_tokens=20):
+            if event.type == "token":
+                output += event.data.token
+            elif event.type == "final":
+                output = event.data.content
+                break
+            elif event.type == "error":
+                raise Exception(event.data.message)
+        
+        if "true" in output.lower():
+            return True
+        return False
+    except Exception as e:
+        print(f"Smart router failed: {e}")
+        return False

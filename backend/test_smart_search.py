@@ -15,7 +15,7 @@ async def test_smart_search():
         "models": [
             {
                 "provider_id": "google",
-                "model_id": "gemini-2.5-flash",
+                "model_id": "gemini-flash-latest",
                 "temperature": 0.7,
                 "max_tokens": 1000
             }

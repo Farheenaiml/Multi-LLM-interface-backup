@@ -53,9 +53,7 @@ export const Workspace: React.FC = () => {
       console.warn('⚠️ Using fallback models');
       setAvailableModels([
         { id: 'google:gemini-2.5-flash', name: 'Gemini 2.5 Flash', provider: 'google', maxTokens: 1048576, costPer1kTokens: 0.0007, supportsStreaming: true },
-        { id: 'google:gemini-2.0-flash', name: 'Gemini 2.0 Flash', provider: 'google', maxTokens: 1048576, costPer1kTokens: 0.0001, supportsStreaming: true },
         { id: 'google:gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash Lite', provider: 'google', maxTokens: 1048576, costPer1kTokens: 0.000075, supportsStreaming: true },
-        { id: 'google:gemini-1.5-flash', name: 'Gemini 1.5 Flash', provider: 'google', maxTokens: 1048576, costPer1kTokens: 0.000075, supportsStreaming: true },
         { id: 'groq:llama-3.1-8b-instant', name: 'Llama 3.1 8B Instant', provider: 'groq', maxTokens: 8192, costPer1kTokens: 0.0001, supportsStreaming: true },
         { id: 'groq:llama-3.3-70b-versatile', name: 'Llama 3.3 70B Versatile', provider: 'groq', maxTokens: 32768, costPer1kTokens: 0.0005, supportsStreaming: true },
         { id: 'groq:qwen-qwq-32b', name: 'Qwen 3 32B', provider: 'groq', maxTokens: 32768, costPer1kTokens: 0.0008, supportsStreaming: true },

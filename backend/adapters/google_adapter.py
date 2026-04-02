@@ -110,160 +110,174 @@ class GoogleDataStudioAdapter(LLMAdapter):
             token_count = 0
             full_content = ""
             
-            async with self.client.stream(
-                "POST",
-                url,
-                json=payload,
-                params=params,
-                headers=headers
-            ) as response:
+            max_retries = 3
+            
+            for attempt in range(max_retries):
+                async with self.client.stream(
+                    "POST",
+                    url,
+                    json=payload,
+                    params=params,
+                    headers=headers
+                ) as response:
                 
-                if response.status_code != 200:
-                    error_text = await response.aread()
-                    error_content = error_text.decode()
+                    if response.status_code in [503, 429] and attempt < max_retries - 1:
+                        import asyncio
+                        # For rate limits, wait a bit longer to let the quota refresh (e.g. 15 RPM limit)
+                        base_wait = 3 if response.status_code == 429 else 2
+                        wait_time = (attempt + 1) * base_wait
+                        print(f"⚠️ Google API {response.status_code} on attempt {attempt+1}. Retrying in {wait_time}s...")
+                        await asyncio.sleep(wait_time)
+                        continue
+                        
+                    if response.status_code != 200:
+                        error_text = await response.aread()
+                        error_content = error_text.decode()
                     
-                    # Print detailed error information
-                    print(f"🔴 GOOGLE API ERROR - Status Code: {response.status_code}")
-                    print(f"🔴 Model: {model}")
-                    print(f"🔴 Response Headers: {dict(response.headers)}")
-                    print(f"🔴 Error Content: {error_content[:1000]}")
+                        # Print detailed error information
+                        print(f"🔴 GOOGLE API ERROR - Status Code: {response.status_code}")
+                        print(f"🔴 Model: {model}")
+                        print(f"🔴 Response Headers: {dict(response.headers)}")
+                        print(f"🔴 Error Content: {error_content[:1000]}")
                     
-                    error_handler._log_structured(
-                        "error",
-                        f"Google API error: {response.status_code}",
-                        pane_id=pane_id,
-                        model=model,
-                        status_code=response.status_code,
-                        error_text=error_content[:500]
-                    )
-                    
-                    # Handle specific error codes
-                    if response.status_code == 429:
-                        retry_after = response.headers.get("retry-after", "unknown")
-                        error_msg = f"Google Rate Limited (429) - Retry after: {retry_after}s"
-                    elif response.status_code == 403:
-                        error_msg = f"Google Forbidden (403) - Check API key permissions"
-                    elif response.status_code == 404:
-                        error_msg = f"Google Not Found (404) - Model '{model}' may not exist"
-                    else:
-                        error_msg = f"Google API Error ({response.status_code})"
-                    
-                    yield StreamEvent(
-                        type="error",
-                        pane_id=pane_id,
-                        data=ErrorData(
-                            message=error_msg,
-                            code=f"http_{response.status_code}",
-                            retryable=response.status_code >= 500 or response.status_code == 429
+                        error_handler._log_structured(
+                            "error",
+                            f"Google API error: {response.status_code}",
+                            pane_id=pane_id,
+                            model=model,
+                            status_code=response.status_code,
+                            error_text=error_content[:500]
                         )
-                    )
-                    return
-                
-                print(f"🔍 Starting to process Google streaming response for pane: {pane_id}")
-                
-                # Read the entire response and parse as JSON
-                response_text = await response.aread()
-                response_str = response_text.decode('utf-8')
-                print(f"📥 Complete response from Google ({len(response_str)} bytes): {response_str[:1000]}...")
-                
-                try:
-                    # Parse the complete JSON response
-                    data = json.loads(response_str)
-                    print(f"📊 Parsed complete JSON data keys/length: {len(data) if isinstance(data, list) else 'Dict'}")
                     
-                    # Handle array of streaming chunks (Standard Google Stream API)
-                    if isinstance(data, list):
-                        for response_obj in data:
-                            if "candidates" in response_obj and len(response_obj["candidates"]) > 0:
-                                candidate = response_obj["candidates"][0]
+                        # Handle specific error codes
+                        if response.status_code == 429:
+                            retry_after = response.headers.get("retry-after")
+                            if retry_after:
+                                error_msg = f"Google Rate Limited (429) - Retry after: {retry_after}s"
+                            else:
+                                error_msg = "Google Rate Limited (429) - Please wait before trying again"
+                        elif response.status_code == 403:
+                            error_msg = f"Google Forbidden (403) - Check API key permissions"
+                        elif response.status_code == 404:
+                            error_msg = f"Google Not Found (404) - Model '{model}' may not exist"
+                        else:
+                            error_msg = f"Google API Error ({response.status_code})"
+                    
+                        yield StreamEvent(
+                            type="error",
+                            pane_id=pane_id,
+                            data=ErrorData(
+                                message=error_msg,
+                                code=f"http_{response.status_code}",
+                                retryable=response.status_code >= 500 or response.status_code == 429
+                            )
+                        )
+                        return
+                
+                    print(f"Starting to process Google streaming response for pane: {pane_id}")
+                
+                    # Read the entire response and parse as JSON
+                    response_text = await response.aread()
+                    response_str = response_text.decode('utf-8')
+                    print(f"Complete response from Google ({len(response_str)} bytes): {response_str[:1000]}...")
+                
+                    try:
+                        # Parse the complete JSON response
+                        data = json.loads(response_str)
+                        print(f"Parsed complete JSON data keys/length: {len(data) if isinstance(data, list) else 'Dict'}")
+                    
+                        # Handle array of streaming chunks (Standard Google Stream API)
+                        if isinstance(data, list):
+                            for response_obj in data:
+                                if "candidates" in response_obj and len(response_obj["candidates"]) > 0:
+                                    candidate = response_obj["candidates"][0]
                                 
-                                # Extract text content
-                                if "content" in candidate and "parts" in candidate["content"]:
-                                    for part in candidate["content"]["parts"]:
-                                        if "text" in part:
-                                            token = part["text"]
-                                            if token:
-                                                full_content += token
-                                                token_count += len(token.split())
+                                    # Extract text content
+                                    if "content" in candidate and "parts" in candidate["content"]:
+                                        for part in candidate["content"]["parts"]:
+                                            if "text" in part:
+                                                token = part["text"]
+                                                if token:
+                                                    full_content += token
+                                                    token_count += len(token.split())
                                                 
-                                                yield StreamEvent(
-                                                    type="token",
-                                                    pane_id=pane_id,
-                                                    data=TokenData(token=token, position=token_count)
-                                                )
+                                                    yield StreamEvent(
+                                                        type="token",
+                                                        pane_id=pane_id,
+                                                        data=TokenData(token=token, position=token_count)
+                                                    )
                                 
-                                # Check for finish reason in the last chunk or current chunk
-                                if "finishReason" in candidate:
-                                    end_time = datetime.now()
-                                    latency = int((end_time - start_time).total_seconds() * 1000)
-                                    
-                                    # Emit final content
+                                    # Check for finish reason in the last chunk or current chunk
+                                    finish_reason = candidate.get("finishReason")
+                                    if finish_reason and finish_reason.upper() != "NULL":
+                                        end_time = datetime.now()
+                                        latency = int((end_time - start_time).total_seconds() * 1000)
+                                        
+                                        # Emit final content
+                                        yield StreamEvent(
+                                            type="final",
+                                            pane_id=pane_id,
+                                            data=FinalData(
+                                                content=full_content,
+                                                finish_reason=finish_reason
+                                            )
+                                        )
+                                        
+                                        # Emit metrics
+                                        estimated_cost = self._estimate_cost(model, token_count)
+                                        yield StreamEvent(
+                                            type="meter",
+                                            pane_id=pane_id,
+                                            data=MeterData(
+                                                tokens_used=token_count,
+                                                cost=estimated_cost,
+                                                latency=latency
+                                            )
+                                        )
+                                        break
+                    
+                        # Handle single object response (e.g. error or non-streaming structure)
+                        elif isinstance(data, dict):
+                             # If it's a valid response dict (candidates) but not list
+                             if "candidates" in data and len(data["candidates"]) > 0:
+                                # Re-use similar logic or just extract all at once
+                                candidate = data["candidates"][0]
+                                if "content" in candidate and "parts" in candidate["content"]:
+                                    text = "".join([p.get("text", "") for p in candidate["content"]["parts"]])
+                                    full_content = text
+                                    token_count = len(text.split())
+                                
+                                    yield StreamEvent(
+                                        type="token",
+                                        pane_id=pane_id,
+                                        data=TokenData(token=text, position=token_count)
+                                    )
+                                
                                     yield StreamEvent(
                                         type="final",
                                         pane_id=pane_id,
                                         data=FinalData(
                                             content=full_content,
-                                            finish_reason=candidate["finishReason"]
+                                            finish_reason=candidate.get("finishReason", "STOP")
                                         )
                                     )
-                                    
-                                    # Emit metrics
-                                    estimated_cost = self._estimate_cost(model, token_count)
-                                    yield StreamEvent(
-                                        type="meter",
-                                        pane_id=pane_id,
-                                        data=MeterData(
-                                            tokens_used=token_count,
-                                            cost=estimated_cost,
-                                            latency=latency
-                                        )
-                                    )
-                                    break
-                    
-                    # Handle single object response (e.g. error or non-streaming structure)
-                    elif isinstance(data, dict):
-                         # If it's a valid response dict (candidates) but not list
-                         if "candidates" in data and len(data["candidates"]) > 0:
-                            # Re-use similar logic or just extract all at once
-                            candidate = data["candidates"][0]
-                            if "content" in candidate and "parts" in candidate["content"]:
-                                text = "".join([p.get("text", "") for p in candidate["content"]["parts"]])
-                                full_content = text
-                                token_count = len(text.split())
-                                
-                                yield StreamEvent(
-                                    type="token",
-                                    pane_id=pane_id,
-                                    data=TokenData(token=text, position=token_count)
-                                )
-                                
-                                yield StreamEvent(
-                                    type="final",
-                                    pane_id=pane_id,
-                                    data=FinalData(
-                                        content=full_content,
-                                        finish_reason=candidate.get("finishReason", "STOP")
-                                    )
-                                )
-                         else:
-                            print(f"⚠️ Warning: Unrecognized JSON dict structure: {data.keys()}")
+                             else:
+                                print(f"⚠️ Warning: Unrecognized JSON dict structure: {data.keys()}")
 
-                except json.JSONDecodeError as e:
-                    print(f"❌ Failed to parse JSON response from Google: {e}")
-                    # Log error but try to continue or fail gracefully
-                    yield StreamEvent(
-                        type="error",
-                        pane_id=pane_id,
-                        data=ErrorData(
-                            message=f"Google API Error: Invalid JSON response",
-                            code="parse_error",
-                            retryable=True
+                    except json.JSONDecodeError as e:
+                        print(f"❌ Failed to parse JSON response from Google: {e}")
+                        # Log error but try to continue or fail gracefully
+                        yield StreamEvent(
+                            type="error",
+                            pane_id=pane_id,
+                            data=ErrorData(
+                                message=f"Google API Error: Invalid JSON response",
+                                code="parse_error",
+                                retryable=True
+                            )
                         )
-                    )
-                    
-                except json.JSONDecodeError:
-                    print(f"❌ Failed to parse JSON response from Google")
-                    pass  # Skip malformed JSON
+                
+                break # Success, exit retry loop
                 
         except httpx.TimeoutException as e:
             error_handler._log_structured(
@@ -326,25 +340,16 @@ class GoogleDataStudioAdapter(LLMAdapter):
         Get available Google models - return hardcoded models to avoid API rate limits.
         """
         if not self.api_key:
-            print("❌ Google API key not configured")
+            print("Google API key not configured")
             return []
         
         # Always return fallback models to avoid rate limiting and API calls
-        print("✅ Returning Google fallback models")
+        print("Returning Google fallback models")
         return self._get_fallback_models()
     
     def _get_fallback_models(self) -> List[ModelInfo]:
         """Return hardcoded working Google models - 3 core models"""
         return [
-            ModelInfo(
-                id="gemini-1.5-flash",
-                name="Gemini 1.5 Flash",
-                provider="google",
-                max_tokens=1048576,
-                cost_per_1k_tokens=0.0007,
-                supports_streaming=True,
-                supports_vision=True
-            ),
             ModelInfo(
                 id="gemini-flash-latest",
                 name="Gemini Flash Latest",
@@ -353,10 +358,17 @@ class GoogleDataStudioAdapter(LLMAdapter):
                 cost_per_1k_tokens=0.0007,
                 supports_streaming=True,
                 supports_vision=True
+            ),
+            ModelInfo(
+                id="gemini-2.5-flash",
+                name="Gemini 2.5 Flash",
+                provider="google",
+                max_tokens=1048576,
+                cost_per_1k_tokens=0.000075,
+                supports_streaming=True,
+                supports_vision=True
             )
         ]
-    
-        return formatted
     
     def _format_messages(self, messages: List[Message]) -> List[Dict[str, Any]]:
         """
