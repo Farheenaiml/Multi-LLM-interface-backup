@@ -1,6 +1,33 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import { useAppStore } from '../../store';
 import './CodeCompareArena.css';
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+interface SecurityIssue {
+  severity: 'critical' | 'high' | 'medium' | 'low';
+  title: string;
+  description: string;
+  line?: number;
+}
+
+interface BugReport {
+  severity: 'critical' | 'high' | 'medium' | 'low';
+  title: string;
+  description: string;
+  line?: number;
+}
+
+interface ExecutionResult {
+  success: boolean;
+  stdout: string;
+  stderr: string;
+  compile_output: string;
+  status: string;
+  time?: number;
+  memory?: number;
+  engine: string;
+}
 
 interface CodeAnalysis {
   paneId: string;
@@ -17,22 +44,10 @@ interface CodeAnalysis {
   linesOfCode: number;
   cyclomaticComplexity: number;
   overallScore: number;
-  analysisStatus: 'idle' | 'analyzing' | 'done' | 'error';
+  analysisStatus: 'idle' | 'analyzing' | 'executing' | 'done' | 'error';
   errorMessage?: string;
-}
-
-interface SecurityIssue {
-  severity: 'critical' | 'high' | 'medium' | 'low';
-  title: string;
-  description: string;
-  line?: number;
-}
-
-interface BugReport {
-  severity: 'critical' | 'high' | 'medium' | 'low';
-  title: string;
-  description: string;
-  line?: number;
+  executionResult?: ExecutionResult;
+  manualWinner?: boolean;
 }
 
 interface CodeCompareArenaProps {
@@ -40,47 +55,72 @@ interface CodeCompareArenaProps {
   onClose: () => void;
 }
 
-const extractCodeFromMessages = (messages: any[]): string => {
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+const extractCodeFromMessages = (messages: any[]): { code: string; language: string } => {
   const assistantMsgs = [...messages].reverse().filter(m => m.role === 'assistant');
   for (const msg of assistantMsgs) {
-    const match = msg.content.match(/```[\w]*\n?([\s\S]*?)```/);
-    if (match) return match[1].trim();
+    const match = msg.content.match(/```(\w*)\n?([\s\S]*?)```/);
+    if (match) return { code: match[2].trim(), language: match[1] || '' };
   }
   const last = assistantMsgs[0];
-  return last ? last.content.trim() : '';
+  return { code: last ? last.content.trim() : '', language: '' };
 };
 
-const detectLanguage = (code: string): string => {
+const detectLanguage = (code: string, hint: string): string => {
+  if (hint) {
+    const h = hint.toLowerCase();
+    if (h.includes('python') || h === 'py') return 'Python';
+    if (h.includes('javascript') || h === 'js') return 'JavaScript';
+    if (h.includes('typescript') || h === 'ts') return 'TypeScript';
+    if (h.includes('java')) return 'Java';
+    if (h.includes('cpp') || h === 'c++') return 'C++';
+    if (h === 'c') return 'C';
+    if (h.includes('go')) return 'Go';
+    if (h.includes('rust') || h === 'rs') return 'Rust';
+  }
   if (/def |import |print\(|:\s*$/.test(code)) return 'Python';
-  if (/function |const |let |var |=>/.test(code)) return 'JavaScript/TypeScript';
+  if (/function |const |let |var |=>/.test(code)) return 'JavaScript';
   if (/public class|System\.out|void main/.test(code)) return 'Java';
-  if (/#include|int main|std::/.test(code)) return 'C/C++';
+  if (/#include|int main|std::/.test(code)) return 'C++';
   if (/func |package main|fmt\./.test(code)) return 'Go';
   if (/fn |let mut|println!/.test(code)) return 'Rust';
   return 'Unknown';
 };
 
-const callClaudeForAnalysis = async (code: string, modelName: string): Promise<Partial<CodeAnalysis>> => {
-  const response = await fetch('http://localhost:5000/analyze-code', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ code, model_name: modelName })
-  });
-
-  if (!response.ok) {
-    throw new Error(`Backend error: ${response.status} ${response.statusText}`);
-  }
-
-  try {
-    return await response.json();
-  } catch {
-    return {
-      timeComplexity: 'N/A', spaceComplexity: 'N/A',
-      readabilityScore: 50, readabilityGrade: 'C',
-      cyclomaticComplexity: 1, securityIssues: [], bugs: [], overallScore: 50
-    };
-  }
+const normalizeCode = (code: string): string => {
+  const lines = code.split('\n');
+  while (lines.length && !lines[0].trim()) lines.shift();
+  while (lines.length && !lines[lines.length-1].trim()) lines.pop();
+  const indents = lines.filter(l => l.trim()).map(l => l.length - l.trimStart().length);
+  const minIndent = indents.length ? Math.min(...indents) : 0;
+  return lines.map(l => l.slice(minIndent)).join('\n');
 };
+
+// Compute inline diff between two code strings — returns array of {type, text}
+const computeDiff = (codeA: string, codeB: string) => {
+  const linesA = codeA.split('\n');
+  const linesB = codeB.split('\n');
+  const result: { type: 'same' | 'add' | 'remove'; text: string; lineA?: number; lineB?: number }[] = [];
+  const maxLen = Math.max(linesA.length, linesB.length);
+  for (let i = 0; i < maxLen; i++) {
+    const a = linesA[i];
+    const b = linesB[i];
+    if (a === undefined) {
+      result.push({ type: 'add', text: b, lineB: i + 1 });
+    } else if (b === undefined) {
+      result.push({ type: 'remove', text: a, lineA: i + 1 });
+    } else if (a === b) {
+      result.push({ type: 'same', text: a, lineA: i + 1, lineB: i + 1 });
+    } else {
+      result.push({ type: 'remove', text: a, lineA: i + 1 });
+      result.push({ type: 'add', text: b, lineB: i + 1 });
+    }
+  }
+  return result;
+};
+
+// ── Sub-components ────────────────────────────────────────────────────────────
 
 const ScoreRing: React.FC<{ score: number; size?: number }> = ({ score, size = 72 }) => {
   const r = (size / 2) - 6;
@@ -89,15 +129,12 @@ const ScoreRing: React.FC<{ score: number; size?: number }> = ({ score, size = 7
   const color = score >= 80 ? '#22c55e' : score >= 60 ? '#f59e0b' : score >= 40 ? '#f97316' : '#ef4444';
   return (
     <svg width={size} height={size} className="score-ring">
-      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="5" />
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="rgba(0,0,0,0.08)" strokeWidth="5" />
       <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth="5"
         strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
         transform={`rotate(-90 ${size/2} ${size/2})`} style={{ transition: 'stroke-dashoffset 0.8s ease' }} />
-     
-        <text x="50%" y="50%" dominantBaseline="middle" textAnchor="middle"
-  fill="#111111" fontSize={size * 0.22} fontWeight="700">
-  {score}
-</text>
+      <text x="50%" y="50%" dominantBaseline="middle" textAnchor="middle"
+        fill="#111111" fontSize={size * 0.22} fontWeight="700">{score}</text>
     </svg>
   );
 };
@@ -107,7 +144,7 @@ const SeverityBadge: React.FC<{ severity: string }> = ({ severity }) => (
 );
 
 const ComplexityBar: React.FC<{ label: string; value: string }> = ({ label, value }) => {
-  const level = value.includes('n²') || value.includes('n^2') || value.includes('2^n') ? 'high'
+  const level = (value.includes('n²') || value.includes('n^2') || value.includes('2^n')) ? 'high'
     : value.includes('n log') ? 'medium' : value === 'O(1)' ? 'low' : 'medium';
   return (
     <div className="complexity-bar-item">
@@ -158,33 +195,102 @@ const IssueList: React.FC<{ items: (SecurityIssue | BugReport)[]; type: 'securit
   );
 };
 
-const WinnerBadge: React.FC<{ analysis: CodeAnalysis[] }> = ({ analysis }) => {
-  const done = analysis.filter(a => a.analysisStatus === 'done');
-  if (done.length < 2) return null;
-  const winner = done.reduce((a, b) => a.overallScore > b.overallScore ? a : b);
+const ExecutionPanel: React.FC<{ result?: ExecutionResult; isExecuting?: boolean }> = ({ result, isExecuting }) => {
+  if (isExecuting) {
+    return <div className="exec-running"><div className="loading-ring" /><span>Executing code...</span></div>;
+  }
+  if (!result) {
+    return <div className="exec-empty"><span>▶</span><span>Click "Run Code" to execute</span></div>;
+  }
   return (
-    <div className="winner-banner">
-      <span className="winner-trophy">🏆</span>
-      <span className="winner-text">
-        Best overall: <strong>{winner.modelName}</strong>
-        <span className="winner-score">({winner.overallScore}/100)</span>
-      </span>
+    <div className="exec-result">
+      <div className={`exec-status ${result.success ? 'exec-ok' : 'exec-fail'}`}>
+        {result.success ? '✅' : '❌'} {result.status}
+        {result.time && <span className="exec-meta"> · {result.time}s</span>}
+        {result.memory && <span className="exec-meta"> · {result.memory}KB</span>}
+        <span className="exec-engine"> via {result.engine}</span>
+      </div>
+      {result.compile_output && (
+        <div className="exec-section">
+          <span className="exec-section-label">Compile Output</span>
+          <pre className="exec-output exec-compile">{result.compile_output}</pre>
+        </div>
+      )}
+      {result.stdout && (
+        <div className="exec-section">
+          <span className="exec-section-label">stdout</span>
+          <pre className="exec-output exec-stdout">{result.stdout}</pre>
+        </div>
+      )}
+      {result.stderr && (
+        <div className="exec-section">
+          <span className="exec-section-label">stderr</span>
+          <pre className="exec-output exec-stderr">{result.stderr}</pre>
+        </div>
+      )}
     </div>
   );
 };
 
+const DiffViewer: React.FC<{ analyses: CodeAnalysis[]; paneAId: string; paneBId: string }> = ({ analyses, paneAId, paneBId }) => {
+  const a = analyses.find(x => x.paneId === paneAId);
+  const b = analyses.find(x => x.paneId === paneBId);
+  if (!a || !b) return <div className="diff-empty">Select two panes to compare</div>;
+
+  const diff = computeDiff(a.code, b.code);
+  const changes = diff.filter(d => d.type !== 'same').length;
+
+  return (
+    <div className="diff-container">
+      <div className="diff-header-row">
+        <div className="diff-col-label">{a.modelName}</div>
+        <div className="diff-col-label">{b.modelName}</div>
+      </div>
+      <div className="diff-stats">
+        <span className="diff-stat diff-add">+{diff.filter(d => d.type === 'add').length} lines</span>
+        <span className="diff-stat diff-remove">-{diff.filter(d => d.type === 'remove').length} lines</span>
+        <span className="diff-stat">{changes} total changes</span>
+      </div>
+      <div className="diff-body">
+        <div className="diff-col">
+          {diff.filter(d => d.type !== 'add').map((line, i) => (
+            <div key={i} className={`diff-line diff-line-${line.type}`}>
+              <span className="diff-lineno">{line.lineA ?? ''}</span>
+              <span className="diff-linetext">{line.text}</span>
+            </div>
+          ))}
+        </div>
+        <div className="diff-col">
+          {diff.filter(d => d.type !== 'remove').map((line, i) => (
+            <div key={i} className={`diff-line diff-line-${line.type}`}>
+              <span className="diff-lineno">{line.lineB ?? ''}</span>
+              <span className="diff-linetext">{line.text}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── Main Component ────────────────────────────────────────────────────────────
+
 export const CodeCompareArena: React.FC<CodeCompareArenaProps> = ({ isVisible, onClose }) => {
   const { activePanes } = useAppStore();
-  const [analyses, setAnalyses] = useState<Record<string, CodeAnalysis>>({});
-  const [activeTab, setActiveTab] = useState<'overview' | 'security' | 'bugs' | 'complexity'>('overview');
-  const [isRunning, setIsRunning] = useState(false);
+  const [analyses, setAnalyses]           = useState<Record<string, CodeAnalysis>>({});
+  const [activeTab, setActiveTab]         = useState<'overview' | 'complexity' | 'security' | 'bugs' | 'execution' | 'diff'>('overview');
+  const [isRunning, setIsRunning]         = useState(false);
   const [selectedPaneIds, setSelectedPaneIds] = useState<string[]>([]);
+  const [manualWinnerId, setManualWinnerId]   = useState<string | null>(null);
+  const [diffPaneA, setDiffPaneA]         = useState<string>('');
+  const [diffPaneB, setDiffPaneB]         = useState<string>('');
+  const [isExporting, setIsExporting]     = useState(false);
+  const [isExecuting, setIsExecuting]     = useState(false);
 
   const paneList = Object.values(activePanes);
 
-  const togglePane = (id: string) => {
+  const togglePane = (id: string) =>
     setSelectedPaneIds(prev => prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id]);
-  };
 
   const runAnalysis = async () => {
     const targets = selectedPaneIds.length > 0
@@ -192,33 +298,63 @@ export const CodeCompareArena: React.FC<CodeCompareArenaProps> = ({ isVisible, o
       : paneList;
     if (targets.length === 0) return;
     setIsRunning(true);
+    setManualWinnerId(null);
 
     const initial: Record<string, CodeAnalysis> = {};
     targets.forEach(pane => {
-      const code = extractCodeFromMessages(pane.messages);
+      const { code, language } = extractCodeFromMessages(pane.messages);
+      const normalizedCode = normalizeCode(code);
+      const detectedLang   = detectLanguage(normalizedCode, language);
       initial[pane.id] = {
         paneId: pane.id, modelName: pane.modelInfo.name, provider: pane.modelInfo.provider,
-        code, language: detectLanguage(code), timeComplexity: '—', spaceComplexity: '—',
-        readabilityScore: 0, readabilityGrade: '—', securityIssues: [], bugs: [],
-        linesOfCode: code.split('\n').filter(l => l.trim()).length,
+        code: normalizedCode, language: detectedLang,
+        timeComplexity: '—', spaceComplexity: '—',
+        readabilityScore: 0, readabilityGrade: '—',
+        securityIssues: [], bugs: [],
+        linesOfCode: normalizedCode.split('\n').filter(l => l.trim()).length,
         cyclomaticComplexity: 1, overallScore: 0,
-        analysisStatus: code ? 'analyzing' : 'error',
-        errorMessage: code ? undefined : 'No code found in conversation'
+        analysisStatus: normalizedCode ? 'analyzing' : 'error',
+        errorMessage: normalizedCode ? undefined : 'No code found in conversation'
       };
     });
     setAnalyses(initial);
 
+    // Set default diff panes
+    const validIds = targets.filter(p => initial[p.id].analysisStatus === 'analyzing').map(p => p.id);
+    if (validIds.length >= 2) {
+      setDiffPaneA(validIds[0]);
+      setDiffPaneB(validIds[1]);
+    }
+
     await Promise.all(
       targets.filter(p => initial[p.id].analysisStatus === 'analyzing').map(async pane => {
         try {
-          const result = await callClaudeForAnalysis(initial[pane.id].code, pane.modelInfo.name);
-          setAnalyses(prev => ({ ...prev, [pane.id]: { ...prev[pane.id], ...result, analysisStatus: 'done' } }));
+          const resp = await fetch('http://localhost:5000/analyze-code', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              code: initial[pane.id].code,
+              model_name: pane.modelInfo.name,
+              language: initial[pane.id].language
+            })
+          });
+          if (!resp.ok) throw new Error(`Backend error: ${resp.status}`);
+          const result = await resp.json();
+          setAnalyses(prev => ({
+            ...prev,
+            [pane.id]: {
+              ...prev[pane.id], ...result,
+              linesOfCode: result.linesOfCode || prev[pane.id].linesOfCode,
+              cyclomaticComplexity: result.cyclomaticComplexity || prev[pane.id].cyclomaticComplexity,
+              analysisStatus: 'done'
+            }
+          }));
         } catch (e) {
           setAnalyses(prev => ({
             ...prev,
             [pane.id]: {
               ...prev[pane.id], analysisStatus: 'error',
-              errorMessage: `Analysis failed: ${e instanceof Error ? e.message : 'Unknown error'}`
+              errorMessage: `Analysis failed: ${e instanceof Error ? e.message : 'Unknown'}`
             }
           }));
         }
@@ -227,14 +363,97 @@ export const CodeCompareArena: React.FC<CodeCompareArenaProps> = ({ isVisible, o
     setIsRunning(false);
   };
 
+  const runExecution = async () => {
+    const targets = Object.values(analyses).filter(a => a.analysisStatus === 'done' && a.code);
+    if (targets.length === 0) return;
+    setIsExecuting(true);
+    setActiveTab('execution');
+
+    await Promise.all(targets.map(async (analysis) => {
+      setAnalyses(prev => ({
+        ...prev,
+        [analysis.paneId]: { ...prev[analysis.paneId], analysisStatus: 'executing' }
+      }));
+      try {
+        const resp = await fetch('http://localhost:5000/execute-code', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: analysis.code, language: analysis.language })
+        });
+        if (!resp.ok) throw new Error(`Execution error: ${resp.status}`);
+        const result: ExecutionResult = await resp.json();
+        setAnalyses(prev => ({
+          ...prev,
+          [analysis.paneId]: { ...prev[analysis.paneId], executionResult: result, analysisStatus: 'done' }
+        }));
+      } catch (e) {
+        setAnalyses(prev => ({
+          ...prev,
+          [analysis.paneId]: {
+            ...prev[analysis.paneId],
+            analysisStatus: 'done',
+            executionResult: {
+              success: false, stdout: '', stderr: String(e),
+              compile_output: '', status: 'Error', engine: 'none'
+            }
+          }
+        }));
+      }
+    }));
+    setIsExecuting(false);
+  };
+
+  const exportPDF = async () => {
+    const results = Object.values(analyses);
+    if (!results.length) return;
+    setIsExporting(true);
+    try {
+      const resp = await fetch('http://localhost:5000/export-report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ results, title: 'Code Compare Arena Report' })
+      });
+      if (!resp.ok) throw new Error(`Export failed: ${resp.status}`);
+      const blob = await resp.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = `code-compare-${Date.now()}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(`PDF export failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   const analysisResults = useMemo(() => Object.values(analyses), [analyses]);
-  const hasResults = analysisResults.some(a => a.analysisStatus === 'done');
+  const hasResults      = analysisResults.some(a => a.analysisStatus === 'done');
+  const doneResults     = analysisResults.filter(a => a.analysisStatus === 'done');
+
+  const winner = useMemo(() => {
+    if (manualWinnerId) return analysisResults.find(a => a.paneId === manualWinnerId) || null;
+    if (doneResults.length < 2) return null;
+    return doneResults.reduce((a, b) => a.overallScore > b.overallScore ? a : b);
+  }, [doneResults, manualWinnerId, analysisResults]);
 
   if (!isVisible) return null;
+
+  const TABS = [
+    { id: 'overview',   label: '📊 Overview' },
+    { id: 'complexity', label: '⏱️ Complexity' },
+    { id: 'security',   label: '🔐 Security' },
+    { id: 'bugs',       label: '🐛 Bugs' },
+    { id: 'execution',  label: '▶ Execution' },
+    { id: 'diff',       label: '🔀 Diff' },
+  ] as const;
 
   return (
     <div className="arena-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
       <div className="arena-modal">
+
+        {/* Header */}
         <div className="arena-header">
           <div className="arena-header-left">
             <span className="arena-icon">⚔️</span>
@@ -243,17 +462,30 @@ export const CodeCompareArena: React.FC<CodeCompareArenaProps> = ({ isVisible, o
               <p className="arena-subtitle">AI-powered analysis across all panes</p>
             </div>
           </div>
-          <button className="arena-close" onClick={onClose}>×</button>
+          <div className="arena-header-actions">
+            {hasResults && (
+              <>
+                <button className="arena-action-btn exec-btn" onClick={runExecution} disabled={isExecuting || isRunning}>
+                  {isExecuting ? '⟳ Running…' : '▶ Run Code'}
+                </button>
+                <button className="arena-action-btn export-btn" onClick={exportPDF} disabled={isExporting}>
+                  {isExporting ? '⟳ Exporting…' : '📄 Export PDF'}
+                </button>
+              </>
+            )}
+            <button className="arena-close" onClick={onClose}>×</button>
+          </div>
         </div>
 
         {paneList.length === 0 ? (
           <div className="arena-empty">
             <div className="arena-empty-icon">💬</div>
             <h3>No active panes</h3>
-            <p>Broadcast a coding prompt to multiple models first, then run the Code Arena.</p>
+            <p>Broadcast a coding prompt to multiple models first.</p>
           </div>
         ) : (
           <>
+            {/* Pane Selector */}
             <div className="arena-pane-selector">
               <span className="selector-label">Analyze panes:</span>
               <div className="selector-chips">
@@ -271,68 +503,173 @@ export const CodeCompareArena: React.FC<CodeCompareArenaProps> = ({ isVisible, o
               </button>
             </div>
 
-            <WinnerBadge analysis={analysisResults} />
+            {/* Winner Banner */}
+            {winner && (
+              <div className="winner-banner">
+                <span className="winner-trophy">{manualWinnerId ? '👑' : '🏆'}</span>
+                <span className="winner-text">
+                  {manualWinnerId ? 'Selected winner' : 'Best overall'}:{' '}
+                  <strong>{winner.modelName}</strong>
+                  <span className="winner-score">({winner.overallScore}/100)</span>
+                </span>
+                {manualWinnerId && (
+                  <button className="clear-winner-btn" onClick={() => setManualWinnerId(null)}>
+                    Clear
+                  </button>
+                )}
+              </div>
+            )}
 
+            {/* Tabs */}
             {hasResults && (
               <div className="arena-tabs">
-                {(['overview', 'complexity', 'security', 'bugs'] as const).map(tab => (
-                  <button key={tab} className={`arena-tab ${activeTab === tab ? 'active' : ''}`} onClick={() => setActiveTab(tab)}>
-                    {tab === 'overview' && '📊 '}{tab === 'complexity' && '⏱️ '}
-                    {tab === 'security' && '🔐 '}{tab === 'bugs' && '🐛 '}
-                    {tab.charAt(0).toUpperCase() + tab.slice(1)}
+                {TABS.map(tab => (
+                  <button key={tab.id}
+                    className={`arena-tab ${activeTab === tab.id ? 'active' : ''}`}
+                    onClick={() => setActiveTab(tab.id)}>
+                    {tab.label}
                   </button>
                 ))}
               </div>
             )}
 
-            {analysisResults.length > 0 && (
+            {/* Diff Tab Controls */}
+            {activeTab === 'diff' && hasResults && doneResults.length >= 2 && (
+              <div className="diff-controls">
+                <label>Compare:</label>
+                <select value={diffPaneA} onChange={e => setDiffPaneA(e.target.value)}>
+                  {doneResults.map(a => (
+                    <option key={a.paneId} value={a.paneId}>{a.modelName}</option>
+                  ))}
+                </select>
+                <span>vs</span>
+                <select value={diffPaneB} onChange={e => setDiffPaneB(e.target.value)}>
+                  {doneResults.map(a => (
+                    <option key={a.paneId} value={a.paneId}>{a.modelName}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* Diff View (full width) */}
+            {activeTab === 'diff' && hasResults && (
+              <div className="arena-diff-panel">
+                <DiffViewer analyses={analysisResults} paneAId={diffPaneA} paneBId={diffPaneB} />
+              </div>
+            )}
+
+            {/* Results Grid */}
+            {analysisResults.length > 0 && activeTab !== 'diff' && (
               <div className="arena-results">
                 {analysisResults.map(analysis => (
-                  <div key={analysis.paneId} className={`result-card status-${analysis.analysisStatus}`}>
+                  <div key={analysis.paneId}
+                    className={`result-card status-${analysis.analysisStatus} ${winner?.paneId === analysis.paneId ? 'winner-card' : ''}`}>
+
+                    {/* Card Header */}
                     <div className="card-header">
                       <div className="card-model-info">
                         <span className="card-provider">{analysis.provider}</span>
                         <span className="card-model">{analysis.modelName}</span>
-                        <span className="card-lang">{analysis.language}</span>
+                        {analysis.language !== 'Unknown' && (
+                          <span className="card-lang">{analysis.language}</span>
+                        )}
                       </div>
-                      {analysis.analysisStatus === 'done' && <ScoreRing score={analysis.overallScore} />}
-                      {analysis.analysisStatus === 'analyzing' && <div className="card-loading"><div className="loading-ring" /></div>}
-                      {analysis.analysisStatus === 'error' && <span className="card-error-icon">⚠️</span>}
+                      <div className="card-header-right">
+                        {analysis.analysisStatus === 'done' && <ScoreRing score={analysis.overallScore} />}
+                        {(analysis.analysisStatus === 'analyzing' || analysis.analysisStatus === 'executing') && (
+                          <div className="card-loading"><div className="loading-ring" /></div>
+                        )}
+                        {analysis.analysisStatus === 'error' && <span className="card-error-icon">⚠️</span>}
+                        {analysis.analysisStatus === 'done' && (
+                          <button
+                            className={`select-winner-btn ${manualWinnerId === analysis.paneId ? 'selected' : ''}`}
+                            onClick={() => setManualWinnerId(
+                              manualWinnerId === analysis.paneId ? null : analysis.paneId
+                            )}
+                            title="Select as winner">
+                            {manualWinnerId === analysis.paneId ? '👑' : '🏅'}
+                          </button>
+                        )}
+                      </div>
                     </div>
 
-                    {analysis.analysisStatus === 'error' && <div className="card-error">{analysis.errorMessage}</div>}
-                    {analysis.analysisStatus === 'analyzing' && (
-                      <div className="card-analyzing"><div className="analyzing-bar" /><span>Running deep analysis…</span></div>
+                    {/* Error state */}
+                    {analysis.analysisStatus === 'error' && (
+                      <div className="card-error">{analysis.errorMessage}</div>
                     )}
 
+                    {/* Analyzing state */}
+                    {(analysis.analysisStatus === 'analyzing' || analysis.analysisStatus === 'executing') && (
+                      <div className="card-analyzing">
+                        <div className="analyzing-bar" />
+                        <span>{analysis.analysisStatus === 'executing' ? 'Executing code…' : 'Running deep analysis…'}</span>
+                      </div>
+                    )}
+
+                    {/* Done state */}
                     {analysis.analysisStatus === 'done' && (
                       <div className="card-body">
                         {activeTab === 'overview' && (
                           <div className="tab-content">
                             <div className="stat-row">
-                              <div className="stat-item"><span className="stat-label">Lines of Code</span><span className="stat-value">{analysis.linesOfCode}</span></div>
-                              <div className="stat-item"><span className="stat-label">Cyclomatic</span><span className="stat-value">{analysis.cyclomaticComplexity}</span></div>
-                              <div className="stat-item"><span className="stat-label">Security Issues</span><span className={`stat-value ${analysis.securityIssues.length > 0 ? 'stat-warn' : 'stat-ok'}`}>{analysis.securityIssues.length}</span></div>
-                              <div className="stat-item"><span className="stat-label">Bugs Found</span><span className={`stat-value ${analysis.bugs.length > 0 ? 'stat-warn' : 'stat-ok'}`}>{analysis.bugs.length}</span></div>
+                              <div className="stat-item">
+                                <span className="stat-label">Lines of Code</span>
+                                <span className="stat-value">{analysis.linesOfCode}</span>
+                              </div>
+                              <div className="stat-item">
+                                <span className="stat-label">Cyclomatic</span>
+                                <span className="stat-value">{analysis.cyclomaticComplexity}</span>
+                              </div>
+                              <div className="stat-item">
+                                <span className="stat-label">Security</span>
+                                <span className={`stat-value ${analysis.securityIssues.length > 0 ? 'stat-warn' : 'stat-ok'}`}>
+                                  {analysis.securityIssues.length}
+                                </span>
+                              </div>
+                              <div className="stat-item">
+                                <span className="stat-label">Bugs</span>
+                                <span className={`stat-value ${analysis.bugs.length > 0 ? 'stat-warn' : 'stat-ok'}`}>
+                                  {analysis.bugs.length}
+                                </span>
+                              </div>
                             </div>
                             <ReadabilityMeter score={analysis.readabilityScore} grade={analysis.readabilityGrade} />
-                            <ComplexityBar label="Time Complexity" value={analysis.timeComplexity} />
+                            <ComplexityBar label="Time Complexity"  value={analysis.timeComplexity} />
                             <ComplexityBar label="Space Complexity" value={analysis.spaceComplexity} />
                           </div>
                         )}
                         {activeTab === 'complexity' && (
                           <div className="tab-content">
-                            <ComplexityBar label="⏱ Time" value={analysis.timeComplexity} />
+                            <ComplexityBar label="⏱ Time"  value={analysis.timeComplexity} />
                             <ComplexityBar label="🗃 Space" value={analysis.spaceComplexity} />
                             <div className="complexity-detail">
                               <span className="complexity-label">Cyclomatic Complexity</span>
-                              <span className={`complexity-value complexity-${analysis.cyclomaticComplexity > 10 ? 'high' : analysis.cyclomaticComplexity > 5 ? 'medium' : 'low'}`}>{analysis.cyclomaticComplexity}</span>
+                              <span className={`complexity-value complexity-${
+                                analysis.cyclomaticComplexity > 10 ? 'high'
+                                : analysis.cyclomaticComplexity > 5 ? 'medium' : 'low'
+                              }`}>{analysis.cyclomaticComplexity}</span>
                             </div>
                             <ReadabilityMeter score={analysis.readabilityScore} grade={analysis.readabilityGrade} />
                           </div>
                         )}
-                        {activeTab === 'security' && <div className="tab-content"><IssueList items={analysis.securityIssues} type="security" /></div>}
-                        {activeTab === 'bugs' && <div className="tab-content"><IssueList items={analysis.bugs} type="bug" /></div>}
+                        {activeTab === 'security' && (
+                          <div className="tab-content">
+                            <IssueList items={analysis.securityIssues} type="security" />
+                          </div>
+                        )}
+                        {activeTab === 'bugs' && (
+                          <div className="tab-content">
+                            <IssueList items={analysis.bugs} type="bug" />
+                          </div>
+                        )}
+                        {activeTab === 'execution' && (
+                          <div className="tab-content">
+                            <ExecutionPanel
+                              result={analysis.executionResult}
+                              isExecuting={analysis.analysisStatus === 'executing'}
+                            />
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

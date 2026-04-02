@@ -4,9 +4,13 @@ FastAPI application with WebSocket support for real-time LLM streaming
 """
 
 import asyncio
+import ast
 import json
 import logging
 import os
+import re
+import subprocess
+import tempfile
 from datetime import datetime
 import sys
 import io
@@ -21,11 +25,11 @@ if isinstance(sys.stderr, io.TextIOWrapper) and sys.stderr.encoding.lower() != '
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, UploadFile, File, Form, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 import uvicorn
 from dotenv import load_dotenv
 import httpx
 
-# Load environment variables
 load_dotenv()
 
 
@@ -42,24 +46,21 @@ from websocket_manager import connection_manager
 from web_search import search_web, should_search_web
 from knowledge_manager import knowledge_manager
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Debug: Check if API keys are loaded
 google_key = os.getenv("GOOGLE_API_KEY")
 groq_key = os.getenv("GROQ_API_KEY")
-print(f"Google API Key: {'Loaded' if google_key else 'Missing'}")
-print(f"Groq API Key: {'Loaded' if groq_key else 'Missing'}")
+print(f"🔑 Google API Key: {'✅ Loaded' if google_key else '❌ Missing'}")
+print(f"🔑 Groq API Key: {'✅ Loaded' if groq_key else '❌ Missing'}")
 
 app = FastAPI(
     title="Multi-LLM Broadcast Workspace API",
     description="Backend API for broadcasting prompts to multiple LLM providers",
-    version="0.1.0"
+    version="0.2.0"
 )
 
 
-# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://localhost:3001", "http://localhost:5173"],
@@ -70,60 +71,234 @@ app.add_middleware(
 
 # Global instances
 session_manager = SessionManager()
-from session_manager import SessionFileManager
-session_file_manager = SessionFileManager()
 broadcast_orchestrator = BroadcastOrchestrator(registry, session_manager)
-manager = connection_manager
+manager               = connection_manager
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _python_static_analysis(code: str) -> dict:
+    """Run real Python static analysis using ast + basic checks."""
+    result = {
+        "linesOfCode": len([l for l in code.splitlines() if l.strip()]),
+        "cyclomaticComplexity": 1,
+        "staticIssues": [],
+    }
+
+    # AST-based cyclomatic complexity
+    try:
+        tree = ast.parse(code)
+        decision_nodes = sum(
+            1 for node in ast.walk(tree)
+            if isinstance(node, (ast.If, ast.For, ast.While, ast.ExceptHandler,
+                                  ast.With, ast.Assert, ast.comprehension))
+        )
+        result["cyclomaticComplexity"] = 1 + decision_nodes
+
+        # Check for common issues via AST
+        for node in ast.walk(tree):
+            # Bare except
+            if isinstance(node, ast.ExceptHandler) and node.type is None:
+                result["staticIssues"].append({
+                    "severity": "medium",
+                    "title": "Bare except clause",
+                    "description": "Catching all exceptions silently can hide bugs.",
+                    "line": node.lineno
+                })
+            # Use of eval
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = ""
+                if isinstance(func, ast.Name):
+                    name = func.id
+                elif isinstance(func, ast.Attribute):
+                    name = func.attr
+                if name == "eval":
+                    result["staticIssues"].append({
+                        "severity": "high",
+                        "title": "Use of eval()",
+                        "description": "eval() is a security risk — avoid executing dynamic strings.",
+                        "line": node.lineno
+                    })
+                if name == "exec":
+                    result["staticIssues"].append({
+                        "severity": "high",
+                        "title": "Use of exec()",
+                        "description": "exec() can execute arbitrary code — use with caution.",
+                        "line": node.lineno
+                    })
+
+    except SyntaxError as e:
+        result["staticIssues"].append({
+            "severity": "critical",
+            "title": "Syntax Error",
+            "description": str(e),
+            "line": e.lineno
+        })
+
+    # Regex-based checks (fast, no deps)
+    lines = code.splitlines()
+    for i, line in enumerate(lines, 1):
+        if re.search(r'password\s*=\s*["\'][^"\']+["\']', line, re.IGNORECASE):
+            result["staticIssues"].append({
+                "severity": "critical",
+                "title": "Hardcoded password",
+                "description": "Password appears to be hardcoded in source code.",
+                "line": i
+            })
+        if re.search(r'(secret|api_key|token)\s*=\s*["\'][^"\']{8,}["\']', line, re.IGNORECASE):
+            result["staticIssues"].append({
+                "severity": "high",
+                "title": "Hardcoded secret/token",
+                "description": "Secret or API key appears hardcoded — use environment variables.",
+                "line": i
+            })
+
+    return result
+
+
+def _js_static_analysis(code: str) -> dict:
+    """Basic JS/TS static analysis using regex (no eslint dependency)."""
+    result = {
+        "linesOfCode": len([l for l in code.splitlines() if l.strip()]),
+        "cyclomaticComplexity": 1,
+        "staticIssues": [],
+    }
+
+    decision_keywords = re.findall(r'\b(if|else if|for|while|switch|catch|\?)\b', code)
+    result["cyclomaticComplexity"] = 1 + len(decision_keywords)
+
+    lines = code.splitlines()
+    for i, line in enumerate(lines, 1):
+        if re.search(r'\beval\s*\(', line):
+            result["staticIssues"].append({
+                "severity": "high", "title": "Use of eval()",
+                "description": "eval() executes arbitrary code — major security risk.", "line": i
+            })
+        if re.search(r'innerHTML\s*=', line):
+            result["staticIssues"].append({
+                "severity": "medium", "title": "innerHTML assignment",
+                "description": "Direct innerHTML assignment can lead to XSS attacks.", "line": i
+            })
+        if re.search(r'document\.write\s*\(', line):
+            result["staticIssues"].append({
+                "severity": "medium", "title": "document.write()",
+                "description": "document.write() is deprecated and can cause XSS.", "line": i
+            })
+        if re.search(r'(password|secret|apiKey|api_key)\s*[:=]\s*["\'][^"\']{4,}["\']', line, re.IGNORECASE):
+            result["staticIssues"].append({
+                "severity": "critical", "title": "Hardcoded credential",
+                "description": "Credential appears hardcoded — use environment variables.", "line": i
+            })
+        if re.search(r'==(?!=)', line) and not re.search(r'===', line):
+            result["staticIssues"].append({
+                "severity": "low", "title": "Loose equality (==)",
+                "description": "Use === for strict equality to avoid type coercion bugs.", "line": i
+            })
+
+    return result
+
+
+def _normalize_code(code: str) -> str:
+    """Normalize code: strip leading/trailing blank lines, consistent indentation."""
+    lines = code.splitlines()
+    # Remove leading/trailing blank lines
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    # Detect minimum indentation and strip it
+    indents = [len(l) - len(l.lstrip()) for l in lines if l.strip()]
+    min_indent = min(indents) if indents else 0
+    normalized = [l[min_indent:] if len(l) >= min_indent else l for l in lines]
+    return "\n".join(normalized)
+
+
+# Judge0 language ID map
+JUDGE0_LANG_MAP = {
+    "python": 71,
+    "javascript": 63,
+    "typescript": 74,
+    "java": 62,
+    "c": 50,
+    "c++": 54,
+    "go": 60,
+    "rust": 73,
+}
+
+JUDGE0_BASE = "https://judge0-ce.p.rapidapi.com"
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/")
 async def root():
-    return {"message": "Multi-LLM Broadcast Workspace API"}
+    return {"message": "Multi-LLM Broadcast Workspace API v0.2"}
 
 
 @app.post("/analyze-code")
 async def analyze_code(request: Request):
-    """Analyze code using Groq and return structured metrics."""
-    body = await request.json()
-    code = body.get("code", "")
+    """
+    Analyze code using:
+    1. Real AST/regex static analysis (Python/JS)
+    2. LLM (Groq) for complexity + readability + overall score
+    """
+    body      = await request.json()
+    code      = body.get("code", "")
     model_name = body.get("model_name", "unknown")
+    language  = body.get("language", "").lower()
 
+    # Normalize code first
+    code = _normalize_code(code)
+
+    # Run real static analysis
+    if "python" in language:
+        static = _python_static_analysis(code)
+    elif any(x in language for x in ["javascript", "typescript", "js", "ts"]):
+        static = _js_static_analysis(code)
+    else:
+        # Fallback: basic line count + regex for all languages
+        static = {
+            "linesOfCode": len([l for l in code.splitlines() if l.strip()]),
+            "cyclomaticComplexity": 1 + len(re.findall(r'\b(if|else|for|while|switch|catch)\b', code)),
+            "staticIssues": [],
+        }
+
+    # LLM analysis for complexity, readability, bugs, overall score
     api_key = os.environ.get("GROQ_API_KEY", "")
     if not api_key:
         raise HTTPException(status_code=500, detail="GROQ_API_KEY not set in .env")
 
-    prompt = f"""You are a senior software engineer. Analyze this code and return ONLY a valid JSON object. No markdown, no explanation, no extra text.
+    prompt = f"""You are a senior software engineer. Analyze this {language or 'code'} and return ONLY a valid JSON object.
 
 Code from {model_name}:
 {code}
 
-Return exactly this JSON:
+Return exactly this JSON (no markdown, no extra text):
 {{
   "timeComplexity": "O(?)",
   "spaceComplexity": "O(?)",
   "readabilityScore": 0,
   "readabilityGrade": "A",
-  "cyclomaticComplexity": 1,
   "securityIssues": [
-    {{"severity": "low", "title": "example", "description": "example description", "line": null}}
+    {{"severity": "low", "title": "example", "description": "example", "line": null}}
   ],
   "bugs": [
-    {{"severity": "low", "title": "example", "description": "example description", "line": null}}
+    {{"severity": "low", "title": "example", "description": "example", "line": null}}
   ],
   "overallScore": 0
 }}
 
-Fill in real values based on the code analysis. Return ONLY the JSON, nothing else."""
+Rules:
+- readabilityScore 0-100, readabilityGrade A/B/C/D/F (must be consistent: 80+ = A, 60-79 = B, 40-59 = C, 20-39 = D, <20 = F)
+- overallScore 0-100 combining complexity, readability, security, bugs
+- If no issues found, return empty arrays (not example items)
+- Return ONLY the JSON"""
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
                 "model": "llama-3.1-8b-instant",
                 "max_tokens": 1000,
@@ -135,164 +310,373 @@ Fill in real values based on the code analysis. Return ONLY the JSON, nothing el
     if resp.status_code != 200:
         raise HTTPException(status_code=502, detail=f"Groq error: {resp.text}")
 
-    data = resp.json()
-    text = data["choices"][0]["message"]["content"]
-    clean = text.replace("```json", "").replace("```", "").strip()
+    text = resp.json()["choices"][0]["message"]["content"]
+    clean = re.sub(r'```(?:json)?', '', text).replace('```', '').strip()
 
     try:
-        return json.loads(clean)
+        llm_result = json.loads(clean)
     except Exception:
-        return {
+        llm_result = {
             "timeComplexity": "N/A", "spaceComplexity": "N/A",
             "readabilityScore": 50, "readabilityGrade": "C",
-            "cyclomaticComplexity": 1, "securityIssues": [], "bugs": [],
-            "overallScore": 50
+            "securityIssues": [], "bugs": [], "overallScore": 50
         }
+
+    # Merge static analysis issues into LLM result
+    all_security = llm_result.get("securityIssues", []) + static.get("staticIssues", [])
+
+    return {
+        **llm_result,
+        "linesOfCode": static["linesOfCode"],
+        "cyclomaticComplexity": static["cyclomaticComplexity"],
+        "securityIssues": all_security,
+    }
+
+
+@app.post("/execute-code")
+async def execute_code(request: Request):
+    """
+    Execute code via Judge0 CE (free, cloud-based, 50+ languages).
+    Falls back to local Python subprocess for Python code if Judge0 is unavailable.
+    """
+    body     = await request.json()
+    code     = body.get("code", "")
+    language = body.get("language", "python").lower()
+    stdin    = body.get("stdin", "")
+
+    if not code.strip():
+        raise HTTPException(status_code=400, detail="No code provided")
+
+    # Normalize code
+    code = _normalize_code(code)
+
+    # Try Judge0 first
+    lang_id = None
+    for key, lid in JUDGE0_LANG_MAP.items():
+        if key in language:
+            lang_id = lid
+            break
+
+    if lang_id:
+        try:
+            headers = {
+                "Content-Type": "application/json",
+                "X-RapidAPI-Host": "judge0-ce.p.rapidapi.com",
+            }
+            if judge0_key:
+                headers["X-RapidAPI-Key"] = judge0_key
+
+            import base64
+            async with httpx.AsyncClient(timeout=15) as client:
+                # Submit
+                sub_resp = await client.post(
+                    f"{JUDGE0_BASE}/submissions?base64_encoded=true&wait=false",
+                    headers=headers,
+                    json={
+                        "source_code": base64.b64encode(code.encode()).decode(),
+                        "language_id": lang_id,
+                        "stdin": base64.b64encode(stdin.encode()).decode() if stdin else "",
+                    }
+                )
+                if sub_resp.status_code not in (200, 201):
+                    raise Exception(f"Judge0 submit failed: {sub_resp.status_code}")
+
+                token = sub_resp.json().get("token")
+                if not token:
+                    raise Exception("No token from Judge0")
+
+                # Poll for result (max 10s)
+                for _ in range(10):
+                    await asyncio.sleep(1)
+                    res_resp = await client.get(
+                        f"{JUDGE0_BASE}/submissions/{token}?base64_encoded=true",
+                        headers=headers
+                    )
+                    result = res_resp.json()
+                    status_id = result.get("status", {}).get("id", 0)
+                    if status_id >= 3:  # Done (3=Accepted, 4+=error)
+                        def dec(val):
+                            if val:
+                                try:
+                                    return base64.b64decode(val).decode("utf-8", errors="replace")
+                                except Exception:
+                                    return val
+                            return ""
+
+                        return {
+                            "success": status_id == 3,
+                            "stdout": dec(result.get("stdout", "")),
+                            "stderr": dec(result.get("stderr", "")),
+                            "compile_output": dec(result.get("compile_output", "")),
+                            "status": result.get("status", {}).get("description", "Unknown"),
+                            "time": result.get("time"),
+                            "memory": result.get("memory"),
+                            "engine": "judge0"
+                        }
+
+                return {"success": False, "stdout": "", "stderr": "Execution timed out", "status": "Timeout", "engine": "judge0"}
+
+        except Exception as e:
+            logger.warning(f"Judge0 failed, falling back to local: {e}")
+
+    # Local Python fallback
+    if "python" in language:
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                f.write(code)
+                tmp_path = f.name
+
+            proc = subprocess.run(
+                ["python", tmp_path],
+                capture_output=True, text=True, timeout=10
+            )
+            os.unlink(tmp_path)
+            return {
+                "success": proc.returncode == 0,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+                "compile_output": "",
+                "status": "Accepted" if proc.returncode == 0 else "Runtime Error",
+                "time": None,
+                "memory": None,
+                "engine": "local_python"
+            }
+        except subprocess.TimeoutExpired:
+            return {"success": False, "stdout": "", "stderr": "Execution timed out (10s limit)", "status": "Timeout", "engine": "local_python"}
+        except Exception as e:
+            return {"success": False, "stdout": "", "stderr": str(e), "status": "Error", "engine": "local_python"}
+
+    return {"success": False, "stdout": "", "stderr": f"Language '{language}' not supported for local execution. Add a Judge0 API key for full language support.", "status": "Unsupported", "engine": "none"}
+
+
+@app.post("/export-report")
+async def export_report(request: Request):
+    """Generate a PDF report from Code Compare Arena analysis results."""
+    body    = await request.json()
+    results = body.get("results", [])
+    title   = body.get("title", "Code Compare Arena Report")
+
+    if not results:
+        raise HTTPException(status_code=400, detail="No results to export")
+
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.lib import colors
+        from reportlab.platypus import (
+            SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+            HRFlowable, PageBreak
+        )
+
+        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as f:
+            tmp_path = f.name
+
+        doc    = SimpleDocTemplate(tmp_path, pagesize=A4,
+                                   leftMargin=2*cm, rightMargin=2*cm,
+                                   topMargin=2*cm, bottomMargin=2*cm)
+        styles = getSampleStyleSheet()
+        story  = []
+
+        # Title
+        title_style = ParagraphStyle('Title', parent=styles['Title'],
+                                     fontSize=22, textColor=colors.HexColor('#1a1a2e'),
+                                     spaceAfter=6)
+        sub_style   = ParagraphStyle('Sub', parent=styles['Normal'],
+                                     fontSize=11, textColor=colors.HexColor('#666666'),
+                                     spaceAfter=20)
+        h2_style    = ParagraphStyle('H2', parent=styles['Heading2'],
+                                     fontSize=14, textColor=colors.HexColor('#2d3748'),
+                                     spaceBefore=14, spaceAfter=6)
+        h3_style    = ParagraphStyle('H3', parent=styles['Heading3'],
+                                     fontSize=11, textColor=colors.HexColor('#4a5568'),
+                                     spaceBefore=8, spaceAfter=4)
+        body_style  = ParagraphStyle('Body', parent=styles['Normal'],
+                                     fontSize=9, textColor=colors.HexColor('#333333'),
+                                     spaceAfter=4)
+
+        story.append(Paragraph("⚔️ Code Compare Arena", title_style))
+        story.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y at %H:%M')}", sub_style))
+        story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor('#6366f1')))
+        story.append(Spacer(1, 0.4*cm))
+
+        # Winner
+        done = [r for r in results if r.get("analysisStatus") == "done"]
+        if done:
+            winner = max(done, key=lambda r: r.get("overallScore", 0))
+            story.append(Paragraph(
+                f"🏆 Best Overall: <b>{winner['modelName']}</b> — {winner['overallScore']}/100",
+                ParagraphStyle('Winner', parent=styles['Normal'],
+                               fontSize=13, textColor=colors.HexColor('#b7791f'),
+                               backColor=colors.HexColor('#fffbeb'),
+                               borderPadding=8, spaceAfter=16)
+            ))
+
+        # Summary table
+        table_data = [["Model", "Provider", "Score", "Lines", "Cyclomatic", "Security", "Bugs", "Readability"]]
+        for r in results:
+            if r.get("analysisStatus") == "done":
+                table_data.append([
+                    r.get("modelName", ""),
+                    r.get("provider", ""),
+                    str(r.get("overallScore", 0)),
+                    str(r.get("linesOfCode", 0)),
+                    str(r.get("cyclomaticComplexity", 0)),
+                    str(len(r.get("securityIssues", []))),
+                    str(len(r.get("bugs", []))),
+                    f"{r.get('readabilityGrade','?')} ({r.get('readabilityScore',0)}/100)",
+                ])
+
+        if len(table_data) > 1:
+            story.append(Paragraph("Summary", h2_style))
+            t = Table(table_data, hAlign='LEFT',
+                      colWidths=[3.5*cm, 2.5*cm, 1.5*cm, 1.5*cm, 2*cm, 2*cm, 1.5*cm, 3*cm])
+            t.setStyle(TableStyle([
+                ('BACKGROUND',    (0,0), (-1,0), colors.HexColor('#6366f1')),
+                ('TEXTCOLOR',     (0,0), (-1,0), colors.white),
+                ('FONTSIZE',      (0,0), (-1,0), 9),
+                ('FONTNAME',      (0,0), (-1,0), 'Helvetica-Bold'),
+                ('ROWBACKGROUNDS',(0,1), (-1,-1), [colors.HexColor('#f8f9ff'), colors.white]),
+                ('FONTSIZE',      (0,1), (-1,-1), 8),
+                ('GRID',          (0,0), (-1,-1), 0.5, colors.HexColor('#e2e8f0')),
+                ('ALIGN',         (2,0), (-1,-1), 'CENTER'),
+                ('VALIGN',        (0,0), (-1,-1), 'MIDDLE'),
+                ('TOPPADDING',    (0,0), (-1,-1), 5),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 5),
+            ]))
+            story.append(t)
+            story.append(Spacer(1, 0.5*cm))
+
+        # Per-model detail
+        for r in results:
+            if r.get("analysisStatus") != "done":
+                continue
+
+            story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#e2e8f0')))
+            story.append(Paragraph(f"{r['modelName']} ({r['provider']})", h2_style))
+
+            # Metrics row
+            metrics = [
+                ["Time Complexity", r.get("timeComplexity","N/A")],
+                ["Space Complexity", r.get("spaceComplexity","N/A")],
+                ["Readability", f"{r.get('readabilityGrade','?')} ({r.get('readabilityScore',0)}/100)"],
+                ["Overall Score", f"{r.get('overallScore',0)}/100"],
+            ]
+            mt = Table(metrics, colWidths=[4*cm, 6*cm])
+            mt.setStyle(TableStyle([
+                ('FONTSIZE',  (0,0), (-1,-1), 9),
+                ('TEXTCOLOR', (0,0), (0,-1), colors.HexColor('#6366f1')),
+                ('FONTNAME',  (0,0), (0,-1), 'Helvetica-Bold'),
+                ('GRID',      (0,0), (-1,-1), 0.3, colors.HexColor('#e2e8f0')),
+                ('TOPPADDING',(0,0), (-1,-1), 4),
+                ('BOTTOMPADDING',(0,0), (-1,-1), 4),
+            ]))
+            story.append(mt)
+            story.append(Spacer(1, 0.3*cm))
+
+            # Security issues
+            sec = r.get("securityIssues", [])
+            story.append(Paragraph(f"Security Issues ({len(sec)})", h3_style))
+            if sec:
+                for issue in sec:
+                    line_info = f" — Line {issue['line']}" if issue.get('line') else ""
+                    story.append(Paragraph(
+                        f"<b>[{issue['severity'].upper()}]</b> {issue['title']}{line_info}: {issue['description']}",
+                        body_style
+                    ))
+            else:
+                story.append(Paragraph("✅ No security issues detected.", body_style))
+
+            # Bugs
+            bugs = r.get("bugs", [])
+            story.append(Paragraph(f"Bugs ({len(bugs)})", h3_style))
+            if bugs:
+                for bug in bugs:
+                    line_info = f" — Line {bug['line']}" if bug.get('line') else ""
+                    story.append(Paragraph(
+                        f"<b>[{bug['severity'].upper()}]</b> {bug['title']}{line_info}: {bug['description']}",
+                        body_style
+                    ))
+            else:
+                story.append(Paragraph("✅ No bugs detected.", body_style))
+
+            # Execution result
+            exec_result = r.get("executionResult")
+            if exec_result:
+                story.append(Paragraph("Execution Result", h3_style))
+                status = exec_result.get("status","Unknown")
+                story.append(Paragraph(f"Status: <b>{status}</b>", body_style))
+                if exec_result.get("stdout"):
+                    story.append(Paragraph(f"Output: {exec_result['stdout'][:500]}", body_style))
+                if exec_result.get("stderr"):
+                    story.append(Paragraph(f"Error: {exec_result['stderr'][:300]}", body_style))
+
+            story.append(Spacer(1, 0.4*cm))
+
+        doc.build(story)
+
+        return FileResponse(
+            tmp_path,
+            media_type="application/pdf",
+            filename=f"code-compare-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.pdf",
+            background=None
+        )
+
+    except ImportError:
+        raise HTTPException(status_code=500, detail="reportlab not installed. Run: pip install reportlab")
+    except Exception as e:
+        logger.error(f"PDF export error: {e}")
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
 
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint with provider status and error handler health"""
     try:
-        provider_health = await registry.health_check()
-        error_handler_health = error_handler.get_provider_health()
+        provider_health  = await registry.health_check()
         connection_stats = manager.get_connection_stats()
-
-        healthy_providers = sum(1 for status in provider_health.values() if status)
-        total_providers = len(provider_health)
-
-        overall_status = "healthy"
-        if healthy_providers == 0:
-            overall_status = "unhealthy"
-        elif healthy_providers < total_providers:
-            overall_status = "degraded"
-
-        error_handler._log_structured(
-            "info", "Health check performed",
-            healthy_providers=healthy_providers,
-            total_providers=total_providers,
-            websocket_connections=connection_stats["total_connections"],
-            overall_status=overall_status
+        healthy_providers = sum(1 for s in provider_health.values() if s)
+        total_providers   = len(provider_health)
+        overall_status = "healthy" if healthy_providers == total_providers else (
+            "unhealthy" if healthy_providers == 0 else "degraded"
         )
-
         return HealthResponse(status=overall_status, service="multi-llm-broadcast-workspace")
     except Exception as e:
-        error_handler._log_structured("error", f"Health check error: {str(e)}", error_type=type(e).__name__)
         return HealthResponse(status="unhealthy", service="multi-llm-broadcast-workspace")
 
 
 
 @app.post("/broadcast", response_model=BroadcastResponse)
-async def broadcast(request: BroadcastRequest, background_tasks: BackgroundTasks):
-    """Broadcast a prompt to multiple models"""
+async def create_broadcast(request: BroadcastRequest):
+    """Create a broadcast request to multiple LLM providers"""
     try:
-        logger.info(f"Broadcast request: {request.session_id} with {len(request.models)} models")
-        print(f"Broadcast request: {request.models}")
+        logger.info(f"Creating broadcast for session {request.session_id} with {len(request.models)} models")
+        print(f"🎯 Broadcast request: {request.models}")
 
         for model_selection in request.models:
             model_id = f"{model_selection.provider_id}:{model_selection.model_id}"
-            print(f"Validating model: {model_id}")
+            print(f"🔍 Validating model: {model_id}")
             is_valid = await registry.validate_model(model_id)
-            print(f"Model {model_id} valid: {is_valid}")
+            print(f"✅ Model {model_id} valid: {is_valid}")
             if not is_valid:
                 raise HTTPException(status_code=400, detail=f"Invalid model: {model_id}")
 
-        print(f"Creating/getting session: {request.session_id}")
+        print(f"📝 Creating/getting session: {request.session_id}")
         session = session_manager.get_or_create_session(request.session_id)
-        print(f"Session created: {session.id}")
+        print(f"✅ Session created: {session.id}")
 
         pane_ids = []
         user_message_ids = {}
+
         for model_selection in request.models:
             model_id = f"{model_selection.provider_id}:{model_selection.model_id}"
-            print(f"Getting model info for: {model_id}")
+            print(f"🔍 Getting model info for: {model_id}")
             model_info = await registry.get_model_info(model_id)
-            print(f"Model info: {model_info}")
+            print(f"📋 Model info: {model_info}")
 
             if model_info:
-                # Handle Automatic Smart Search logic
-                enhanced_prompt = request.prompt
-                needs_search = False
-                search_query = enhanced_prompt
-
-                # Explicit trigger check
-                if enhanced_prompt.strip().lower().startswith(("/search ", "/research ")):
-                    needs_search = True
-                    search_query = enhanced_prompt.split(" ", 1)[1]
-                else:
-                    # Smart router check
-                    logger.info("🧠 Checking if prompt needs web search via Smart Router...")
-                    needs_search = await should_search_web(enhanced_prompt)
-
-                if needs_search:
-                    logger.info(f"🔎 Web Search triggered for: {search_query}")
-                    try:
-                        search_data = await search_web(search_query)
-                        search_results = search_data.get("results", [])
-                        search_images = search_data.get("images", [])
-
-                        if search_results:
-                            context_str = (
-                                "=================================================================\n"
-                                "SYSTEM DIRECTIVE: WEB RESEARCH CONTEXT\n"
-                                "=================================================================\n"
-                                "You are an AI assistant answering a query using the live internet data provided below.\n"
-                                "Please synthesize this information naturally into your response.\n"
-                                "1. You should cite sources using Markdown links: `[Source Name](URL)`.\n"
-                            )
-                            
-                            if search_images:
-                                context_str += f"2. You may optionally include this image at the top of your response if relevant: `![Context Image]({search_images[0]})`\n"
-                            else:
-                                context_str += "2. (No images available for this search)\n"
-                                
-                            context_str += "\n--- SEARCH RESULTS ---\n"
-
-                            for res in search_results:
-                                context_str += f"Title: {res['title']}\nURL: {res['url']}\nContent: {res['content']}\n\n"
-                            context_str += "=================================================================\n\n"
-                            
-                    except Exception as e:
-                        logger.error(f"Failed to perform web search: {e}")
-                
-                # Hydrate session files
-                hydrated_images = []
-                if request.images:
-                    for img in request.images:
-                        if img.startswith("session_file:"):
-                            content = session_file_manager.get_file_content(request.session_id, img)
-                            if content:
-                                hydrated_images.append(content)
-                        else:
-                            try:
-                                if img.startswith("data:"):
-                                    header, b64 = img.split(",", 1)
-                                    mime_type = header.split(";", 1)[0].split(":", 1)[1]
-                                    content_bytes = base64.b64decode(b64)
-                                    file_id = str(uuid.uuid4())
-                                    # Cache the new file
-                                    session_file_manager.add_file(request.session_id, file_id, f"auto_{file_id[:8]}", mime_type, content_bytes)
-                            except Exception as e:
-                                logger.error(f"Error auto-caching inline file: {e}")
-                            hydrated_images.append(img)
-
-                # Create user message
-                user_message = Message(
-                    role="user", 
-                    content=enhanced_prompt,
-                    images=hydrated_images if request.images else None
-                )
-                print(f"Created user message with ID: {user_message.id}")
-                
-                messages_list = []
-                if needs_search and 'context_str' in locals() and context_str:
-                    messages_list.append(Message(role="system", content=context_str))
-                messages_list.append(user_message)
-
-                pane = ChatPane(
-                    model_info=model_info,
-                    messages=messages_list
-                )
+                user_message = Message(role="user", content=request.prompt, images=request.images)
+                print(f"📝 Created user message with ID: {user_message.id}")
+                pane = ChatPane(model_info=model_info, messages=[user_message])
                 session.panes.append(pane)
                 pane_ids.append(pane.id)
                 user_message_ids[pane.id] = user_message.id
@@ -314,116 +698,33 @@ async def broadcast(request: BroadcastRequest, background_tasks: BackgroundTasks
             status="started",
             user_message_ids=user_message_ids
         )
-
     except Exception as e:
         logger.error(f"Broadcast error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/chat/{pane_id}")
-async def send_chat_message(pane_id: str, request: dict, background_tasks: BackgroundTasks):
+async def send_chat_message(pane_id: str, request: dict):
     """Send a message to a specific existing pane"""
     try:
-        logger.info(f"Chat request for pane {pane_id}: {request}")
         session_id = request.get("session_id")
         message = request.get("message")
-        system_prompt = request.get("system_prompt")
 
         if not session_id or not message:
-            logger.error(f"Missing required fields: session_id={session_id}, message={bool(message)}")
             raise HTTPException(status_code=400, detail="Missing session_id or message")
 
         session = session_manager.get_session(session_id)
         if not session:
-            logger.error(f"Session not found: {session_id}")
             raise HTTPException(status_code=404, detail="Session not found")
 
         pane = next((p for p in session.panes if p.id == pane_id), None)
         if not pane:
-            logger.error(f"Pane not found: {pane_id} in session {session_id}")
             raise HTTPException(status_code=404, detail="Pane not found")
 
         logger.info(f"🔍 CHAT REQUEST DEBUG: Model ID: {pane.model_info.id} (Provider: {pane.model_info.provider})")
         images = request.get("images")
-        
-        hydrated_images = []
-        if images:
-            for img in images:
-                if img.startswith("session_file:"):
-                    content = session_file_manager.get_file_content(session_id, img)
-                    if content:
-                        hydrated_images.append(content)
-                else:
-                    try:
-                        if img.startswith("data:"):
-                            header, b64 = img.split(",", 1)
-                            mime_type = header.split(";", 1)[0].split(":", 1)[1]
-                            content_bytes = base64.b64decode(b64)
-                            file_id = str(uuid.uuid4())
-                            # Cache the new file
-                            session_file_manager.add_file(session_id, file_id, f"auto_{file_id[:8]}", mime_type, content_bytes)
-                    except Exception as e:
-                        logger.error(f"Error auto-caching inline file: {e}")
-                    hydrated_images.append(img)
-            images = hydrated_images
 
-        if images:
-            logger.info(f"🔍 CHAT REQUEST DEBUG: Received {len(images)} images")
-            logger.info(f"🔍 CHAT REQUEST DEBUG: Image preview: {images[0][:50]}...")
-        # Handle Automatic Smart Search for single chat message
-        enhanced_message = message
-        needs_search = False
-        search_query = enhanced_message
-
-        if enhanced_message.strip().lower().startswith(("/search ", "/research ")):
-            needs_search = True
-            search_query = enhanced_message.split(" ", 1)[1]
-        else:
-            logger.info("🧠 Checking if prompt needs web search via Smart Router...")
-            needs_search = await should_search_web(enhanced_message)
-
-        if needs_search:
-            logger.info(f"🔎 Web Search triggered for: {search_query}")
-            try:
-                search_data = await search_web(search_query)
-                search_results = search_data.get("results", [])
-                search_images = search_data.get("images", [])
-
-                if search_results:
-                    context_str = (
-                        "=================================================================\n"
-                        "SYSTEM DIRECTIVE: WEB RESEARCH CONTEXT\n"
-                        "=================================================================\n"
-                        "You are an AI assistant answering a query using the live internet data provided below.\n"
-                        "Please synthesize this information naturally into your response.\n"
-                        "1. You MUST cite sources using Markdown links with the actual Publisher or Article Title as the clickable text: `[Publisher Name or Title](URL)`.\n"
-                        "2. DO NOT use generic words like 'Source', 'Link', or 'Here' as the clickable text.\n"
-                    )
-                    
-                    if search_images:
-                        context_str += f"2. You may optionally include this image at the top of your response if relevant: `![Context Image]({search_images[0]})`\n"
-                    else:
-                        context_str += "2. (No images available for this search)\n"
-                        
-                    context_str += "\n--- SEARCH RESULTS ---\n"
-
-                    for res in search_results:
-                        context_str += f"Title: {res['title']}\nURL: {res['url']}\nContent: {res['content']}\n\n"
-                    context_str += "=================================================================\n\n"
-                    
-                    logger.info(f"✅ Web research injected as system context (length: {len(context_str)})")
-            except Exception as e:
-                logger.error(f"Failed to perform web search: {e}")
-
-        # Add messages to pane
-        if needs_search and 'context_str' in locals() and context_str:
-            pane.messages.append(Message(role="system", content=context_str))
-            
-        user_message = Message(
-            role="user", 
-            content=enhanced_message,
-            images=images
-        )
+        user_message = Message(role="user", content=message, images=images)
         pane.messages.append(user_message)
         session_manager.update_session(session)
 
@@ -432,45 +733,13 @@ async def send_chat_message(pane_id: str, request: dict, background_tasks: Backg
         else:
             provider_id = pane.model_info.provider
             model_id = pane.model_info.id
-            
-        logger.info(f"Creating model selection: provider_id={provider_id}, model_id={model_id}")
-        
-        model_selection = ModelSelection(
-            provider_id=provider_id,
-            model_id=model_id,
-            temperature=0.7,
-            max_tokens=1000
-        )
-        
-        # For individual chat, we need to pass the conversation context differently
-        # Let's just use the new message for now and enhance the broadcast orchestrator later
-        broadcast_request = BroadcastRequest(
-            session_id=session_id,
-            prompt=enhanced_message,
-            images=images,
-            models=[model_selection],
-            system_prompt=system_prompt
-        )
-        
-        logger.info(f"Starting broadcast to pane {pane_id} with message: {enhanced_message[:50]}...")
-        
-        # Start streaming to existing pane
-        asyncio.create_task(
-            broadcast_orchestrator._stream_to_pane(
-                broadcast_request, model_selection, pane_id, connection_manager
-            )
-        )
-        
-        # Trigger Knowledge Vault background extraction
-        background_tasks.add_task(
-            knowledge_manager.extract_and_store_facts,
-            pane.messages.copy(), 
-            broadcast_orchestrator.registry
-        )
-        
-        logger.info(f"Chat message successfully queued for pane {pane_id}")
-        return {"success": True, "pane_id": pane_id}
 
+        model_selection = ModelSelection(provider_id=provider_id, model_id=model_id, temperature=0.7, max_tokens=1000)
+        broadcast_request = BroadcastRequest(session_id=session_id, prompt=message, images=images, models=[model_selection])
+
+        asyncio.create_task(broadcast_orchestrator._stream_to_pane(broadcast_request, model_selection, pane_id, manager))
+
+        return {"success": True, "pane_id": pane_id}
     except Exception as e:
         logger.error(f"Chat error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -478,142 +747,87 @@ async def send_chat_message(pane_id: str, request: dict, background_tasks: Backg
 
 @app.post("/send-to", response_model=SendToResponse)
 async def send_to_pane(request: SendToRequest):
-    """Send selected messages from one pane to another"""
     try:
-        logger.info(f"Transferring messages from {request.source_pane_id} to {request.target_pane_id}")
         session = session_manager.get_session(request.session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        source_pane = None
-        target_pane = None
-        for pane in session.panes:
-            if pane.id == request.source_pane_id:
-                source_pane = pane
-            elif pane.id == request.target_pane_id:
-                target_pane = pane
+        source_pane = next((p for p in session.panes if p.id == request.source_pane_id), None)
+        target_pane = next((p for p in session.panes if p.id == request.target_pane_id), None)
 
         if not source_pane:
             raise HTTPException(status_code=404, detail=f"Source pane {request.source_pane_id} not found")
         if not target_pane:
             raise HTTPException(status_code=404, detail=f"Target pane {request.target_pane_id} not found")
 
-        selected_messages = []
-        for message_id in request.message_ids:
-            for msg in source_pane.messages:
-                if msg.id == message_id:
-                    selected_messages.append(msg)
-                    break
-
+        selected_messages = [msg for msg_id in request.message_ids
+                             for msg in source_pane.messages if msg.id == msg_id]
         if not selected_messages:
-            raise HTTPException(status_code=400, detail="No valid messages found to transfer")
+            raise HTTPException(status_code=400, detail="No valid messages found")
 
         messages_to_transfer = []
-
         if request.additional_context and request.additional_context.strip():
-            context_message = Message(
-                role="system",
-                content=request.additional_context.strip(),
-                provenance=ProvenanceInfo(
-                    source_model="user-context",
+            messages_to_transfer.append(Message(
+                role="system", content=request.additional_context.strip(),
+                provenance=ProvenanceInfo(source_model="user-context",
                     source_pane_id=request.source_pane_id,
                     transfer_timestamp=datetime.now(),
-                    content_hash=str(hash(request.additional_context))
-                )
-            )
-            messages_to_transfer.append(context_message)
+                    content_hash=str(hash(request.additional_context)))
+            ))
 
         if request.transfer_mode == "summarize":
-            conversation_text = "\n\n".join([f"{msg.role.upper()}: {msg.content}" for msg in selected_messages])
-            summary_prompt = ""
-            if request.summary_instructions and request.summary_instructions.strip():
-                summary_prompt = f"Please summarize the following conversation with these specific instructions: {request.summary_instructions.strip()}\n\n"
-            else:
-                summary_prompt = "Please provide a concise summary of the following conversation:\n\n"
-            summary_prompt += f"Conversation to summarize:\n\n{conversation_text}"
+            conversation_text = "\n\n".join([f"{m.role.upper()}: {m.content}" for m in selected_messages])
+            summary_prompt = (
+                f"{request.summary_instructions.strip()}\n\n" if request.summary_instructions else
+                "Please provide a concise summary of the following conversation:\n\n"
+            ) + conversation_text
 
-            try:
-                adapter = registry.get_adapter(source_pane.model_info.provider)
-                if not adapter:
-                    raise HTTPException(status_code=500, detail=f"No adapter available for {source_pane.model_info.provider}")
+            adapter = registry.get_adapter(source_pane.model_info.provider)
+            if not adapter:
+                raise HTTPException(status_code=500, detail="No adapter available")
 
-                summary_messages = [Message(role="user", content=summary_prompt)]
-                summary_content = ""
+            summary_content = ""
+            async for event in adapter.stream(
+                [Message(role="user", content=summary_prompt)],
+                source_pane.model_info.id.split(':')[-1],
+                f"summary-{request.source_pane_id}", temperature=0.3, max_tokens=500
+            ):
+                if event.type == "token":
+                    summary_content += event.data.token
+                elif event.type == "final":
+                    summary_content = event.data.content
+                    break
 
-                async for event in adapter.stream(
-                    summary_messages,
-                    source_pane.model_info.id.split(':')[-1],
-                    f"summary-{request.source_pane_id}",
-                    temperature=0.3,
-                    max_tokens=500
-                ):
-                    if event.type == "token":
-                        summary_content += event.data.token
-                    elif event.type == "final":
-                        summary_content = event.data.content
-                        break
+            if not summary_content.strip():
+                raise HTTPException(status_code=500, detail="Empty summary response")
 
-                if not summary_content.strip():
-                    raise HTTPException(status_code=500, detail="Failed to generate summary - empty response")
-
-                summary_message = Message(
-                    role="user",
-                    content=summary_content.strip(),
-                    provenance=ProvenanceInfo(
-                        source_model=source_pane.model_info.id,
-                        source_pane_id=request.source_pane_id,
-                        transfer_timestamp=datetime.now(),
-                        content_hash=str(hash(summary_content))
-                    )
-                )
-                messages_to_transfer.append(summary_message)
-
-            except Exception as e:
-                logger.error(f"Failed to generate summary: {e}")
-                raise HTTPException(status_code=500, detail=f"Summary generation failed: {str(e)}")
-
+            messages_to_transfer.append(Message(
+                role="user", content=summary_content.strip(),
+                provenance=ProvenanceInfo(source_model=source_pane.model_info.id,
+                    source_pane_id=request.source_pane_id,
+                    transfer_timestamp=datetime.now(),
+                    content_hash=str(hash(summary_content)))
+            ))
         else:
             for msg in selected_messages:
-                transferred_message = Message(
+                messages_to_transfer.append(Message(
                     role=msg.role if request.preserve_roles else "user",
                     content=msg.content,
-                    provenance=ProvenanceInfo(
-                        source_model=source_pane.model_info.id,
+                    provenance=ProvenanceInfo(source_model=source_pane.model_info.id,
                         source_pane_id=request.source_pane_id,
                         transfer_timestamp=datetime.now(),
-                        content_hash=str(hash(msg.content))
-                    )
-                )
-                messages_to_transfer.append(transferred_message)
+                        content_hash=str(hash(msg.content)))
+                ))
 
         if request.transfer_mode == "replace":
             target_pane.messages.clear()
 
         target_pane.messages.extend(messages_to_transfer)
-        transferred_count = len(messages_to_transfer)
-
-        try:
-            adapter = registry.get_adapter(target_pane.model_info.provider)
-            if adapter and target_pane.messages:
-                context_update_message = Message(
-                    role="system",
-                    content=f"[Context updated: {transferred_count} messages transferred from {source_pane.model_info.name}]",
-                    provenance=ProvenanceInfo(
-                        source_model="system",
-                        source_pane_id=request.target_pane_id,
-                        transfer_timestamp=datetime.now(),
-                        content_hash="context-update"
-                    )
-                )
-                target_pane.messages.append(context_update_message)
-        except Exception as llm_error:
-            logger.warning(f"Failed to update LLM context: {llm_error}")
-
         session_manager.update_session(session)
-        logger.info(f"Successfully transferred {transferred_count} messages to pane {request.target_pane_id}")
 
-        return SendToResponse(success=True, transferred_count=transferred_count, target_pane_id=request.target_pane_id)
-
+        return SendToResponse(success=True,
+                              transferred_count=len(messages_to_transfer),
+                              target_pane_id=request.target_pane_id)
     except Exception as e:
         import traceback
         logger.error(f"Send-to error: {e}\n{traceback.format_exc()}")
@@ -622,9 +836,7 @@ async def send_to_pane(request: SendToRequest):
 
 @app.post("/summarize", response_model=SummaryResponse)
 async def generate_summary(request: SummaryRequest):
-    """Generate summaries of selected panes"""
     try:
-        logger.info(f"Generating summary for panes: {request.pane_ids}")
         session = session_manager.get_session(request.session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -633,37 +845,19 @@ async def generate_summary(request: SummaryRequest):
         for pane_id in request.pane_ids:
             pane = next((p for p in session.panes if p.id == pane_id), None)
             if pane:
-                pane_content = "\n".join([f"{msg.role}: {msg.content}" for msg in pane.messages])
+                pane_content = "\n".join([f"{m.role}: {m.content}" for m in pane.messages])
                 content_parts.append(f"=== {pane.model_info.name} ===\n{pane_content}")
 
-        combined_content = "\n\n".join(content_parts)
+        summaries    = {}
+        summary_pane = ChatPane(model_info=session.panes[0].model_info if session.panes else None, messages=[])
 
-        default_adapter = None
-        for provider_name in registry.list_providers():
-            adapter = registry.get_adapter(provider_name)
-            if adapter:
-                default_adapter = adapter
-                break
-
-        if not default_adapter:
-            raise HTTPException(status_code=503, detail="No summarization model available")
-
-        summary_pane = ChatPane(
-            model_info=await registry.get_model_info("litellm:gpt-3.5-turbo") or
-                      (await registry.discover_models()).get("litellm", [{}])[0],
-            messages=[]
-        )
-
-        summaries = {}
         for summary_type in request.summary_types:
             summaries[summary_type] = f"{summary_type.title()} summary of {len(request.pane_ids)} conversations"
             summary_pane.messages.append(Message(role="assistant", content=summaries[summary_type]))
 
         session.panes.append(summary_pane)
         session_manager.update_session(session)
-
         return SummaryResponse(summary_pane_id=summary_pane.id, summaries=summaries, source_panes=request.pane_ids)
-
     except Exception as e:
         logger.error(f"Summarization error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -692,7 +886,6 @@ async def get_session_files(session_id: str):
 
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str):
-    """Get session details"""
     session = session_manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -701,15 +894,13 @@ async def get_session(session_id: str):
 
 @app.get("/sessions")
 async def list_sessions(limit: int = 50, offset: int = 0):
-    """List sessions with pagination"""
-    sessions = session_manager.list_sessions(limit, offset)
+    sessions    = session_manager.list_sessions(limit, offset)
     total_count = len(session_manager.sessions)
     return {"sessions": sessions, "total_count": total_count, "limit": limit, "offset": offset}
 
 
 @app.delete("/sessions/{session_id}")
 async def delete_session(session_id: str):
-    """Delete a session"""
     success = session_manager.delete_session(session_id)
     if not success:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -718,16 +909,13 @@ async def delete_session(session_id: str):
 
 @app.get("/models")
 async def get_available_models():
-    """Get all available models from all providers"""
     try:
         models_by_provider = await registry.discover_models()
         all_models = []
         for provider, models in models_by_provider.items():
             for model in models:
                 all_models.append({
-                    "id": model.id,
-                    "name": model.name,
-                    "provider": provider,
+                    "id": model.id, "name": model.name, "provider": provider,
                     "max_tokens": model.max_tokens,
                     "cost_per_1k_tokens": model.cost_per_1k_tokens,
                     "supports_streaming": model.supports_streaming
@@ -740,96 +928,73 @@ async def get_available_models():
 
 @app.get("/providers/health")
 async def get_provider_health():
-    """Get health status of all providers"""
     try:
         health_status = await registry.health_check()
         return {
             "providers": health_status,
-            "healthy_count": sum(1 for status in health_status.values() if status),
+            "healthy_count": sum(1 for s in health_status.values() if s),
             "total_count": len(health_status)
         }
     except Exception as e:
-        logger.error(f"Error checking provider health: {e}")
         raise HTTPException(status_code=500, detail="Error checking provider health")
 
 
 @app.get("/stats")
 async def get_system_stats():
-    """Get enhanced system statistics"""
     try:
-        session_stats = session_manager.get_session_stats()
-        broadcast_stats = {
-            "active_broadcasts": sum(1 for b in broadcast_orchestrator.active_broadcasts.values() if b["status"] == "running"),
-            "total_broadcasts": len(broadcast_orchestrator.active_broadcasts)
-        }
-        connection_stats = manager.get_connection_stats()
-        error_handler_stats = error_handler.get_provider_health()
         return {
-            "sessions": session_stats,
-            "broadcasts": broadcast_stats,
-            "websocket_connections": connection_stats,
-            "error_handler": {"provider_health": error_handler_stats, "circuit_breakers": len(error_handler.circuit_breakers)}
+            "sessions":   session_manager.get_session_stats(),
+            "broadcasts": {
+                "active_broadcasts": sum(1 for b in broadcast_orchestrator.active_broadcasts.values() if b["status"] == "running"),
+                "total_broadcasts":  len(broadcast_orchestrator.active_broadcasts)
+            },
+            "websocket_connections": manager.get_connection_stats(),
+            "error_handler": {"provider_health": error_handler.get_provider_health()}
         }
     except Exception as e:
-        error_handler._log_structured("error", f"Error getting stats: {str(e)}", error_type=type(e).__name__)
         raise HTTPException(status_code=500, detail="Error retrieving statistics")
 
 
 @app.get("/system/health/detailed")
 async def get_detailed_health():
-    """Get detailed system health information"""
     try:
-        provider_health = await registry.health_check()
-        error_handler_health = error_handler.get_provider_health()
-        connection_stats = manager.get_connection_stats()
         return {
-            "providers": {"registry_health": provider_health, "error_handler_health": error_handler_health},
-            "websockets": connection_stats,
+            "providers": {"registry_health": await registry.health_check()},
+            "websockets": manager.get_connection_stats(),
             "system": {
-                "active_sessions": len(session_manager.sessions),
+                "active_sessions":   len(session_manager.sessions),
                 "active_broadcasts": len([b for b in broadcast_orchestrator.active_broadcasts.values() if b["status"] == "running"])
             }
         }
     except Exception as e:
-        error_handler._log_structured("error", f"Error getting detailed health: {str(e)}", error_type=type(e).__name__)
         raise HTTPException(status_code=500, detail="Error retrieving detailed health")
 
 
 @app.post("/system/reset-circuit-breakers")
 async def reset_circuit_breakers():
-    """Reset all circuit breakers"""
     try:
         reset_count = 0
-        for provider, circuit_breaker in error_handler.circuit_breakers.items():
-            if circuit_breaker.state != "closed":
-                circuit_breaker.failure_count = 0
-                circuit_breaker.state = "closed"
-                circuit_breaker.last_failure_time = None
+        for _, cb in error_handler.circuit_breakers.items():
+            if cb.state != "closed":
+                cb.failure_count = 0
+                cb.state         = "closed"
+                cb.last_failure_time = None
                 reset_count += 1
-        error_handler._log_structured("info", "Circuit breakers reset", reset_count=reset_count)
-        return {"success": True, "reset_count": reset_count, "message": f"Reset {reset_count} circuit breakers"}
+        return {"success": True, "reset_count": reset_count}
     except Exception as e:
-        error_handler._log_structured("error", f"Error resetting circuit breakers: {str(e)}", error_type=type(e).__name__)
         raise HTTPException(status_code=500, detail="Error resetting circuit breakers")
 
 
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
-    """WebSocket endpoint for real-time streaming"""
     connection_id = None
     try:
-        session = session_manager.get_session(session_id)
-        if not session:
-            print(f"📝 Creating session in backend for WebSocket: {session_id}")
-            session = session_manager.get_or_create_session(session_id)
-
+        session_manager.get_or_create_session(session_id)
         connection_id = await manager.connect(websocket, session_id)
-        error_handler._log_structured("info", "WebSocket connection established", session_id=session_id, connection_id=connection_id)
 
         while True:
             try:
                 data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
-                print(f"📨 WebSocket received: {data}")
                 try:
                     message = json.loads(data)
                     if message.get("type") == "ping":
@@ -838,34 +1003,29 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         if connection_id in manager.connections:
                             manager.connections[connection_id].last_ping = datetime.now()
                 except json.JSONDecodeError:
-                    error_handler._log_structured("warning", "Received malformed JSON from WebSocket client", session_id=session_id, connection_id=connection_id)
-
+                    pass
             except asyncio.TimeoutError:
-                print(f"⏰ WebSocket timeout - sending ping to {session_id}")
                 try:
                     await websocket.send_text('{"type":"ping"}')
-                except Exception as e:
-                    print(f"❌ Failed to send ping: {e}")
+                except Exception:
                     break
                 if not await manager.ping_connection(connection_id):
                     break
 
     except WebSocketDisconnect:
-        error_handler._log_structured("info", "WebSocket client disconnected", session_id=session_id, connection_id=connection_id)
+        pass
     except Exception as e:
-        error_handler._log_structured("error", f"WebSocket error: {str(e)}", session_id=session_id, connection_id=connection_id, error_type=type(e).__name__)
+        logger.error(f"WebSocket error: {e}")
     finally:
         if connection_id:
             manager.disconnect(connection_id, "endpoint_cleanup")
 
-
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
         port=5000,
-        reload=False,
+        reload=True,
         log_level="info"
     )
