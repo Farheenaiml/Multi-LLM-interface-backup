@@ -8,7 +8,7 @@ interface PersonaStudioProps {
 }
 
 export const PersonaStudio: React.FC<PersonaStudioProps> = ({ isVisible, onClose }) => {
-    const { personas, globalPersonaId, setGlobalPersona, addPersona, updatePersona, deletePersona } = usePersonaStore();
+    const { personas, addPersona, updatePersona, deletePersona } = usePersonaStore();
 
     const [editingId, setEditingId] = useState<string | null>(null);
     const [draftName, setDraftName] = useState('');
@@ -59,12 +59,10 @@ export const PersonaStudio: React.FC<PersonaStudioProps> = ({ isVisible, onClose
                         {personas.map(persona => (
                             <div
                                 key={persona.id}
-                                className={`persona-card ${globalPersonaId === persona.id ? 'active' : ''} ${persona.isDefault ? 'default' : ''}`}
-                                onClick={() => setGlobalPersona(globalPersonaId === persona.id ? null : persona.id)}
+                                className={`persona-card ${persona.isDefault ? 'default' : ''}`}
                             >
                                 <div className="persona-card-content">
                                     <h4>
-                                        {globalPersonaId === persona.id && <span className="active-indicator">★</span>}
                                         {persona.name}
                                         {persona.isDefault && <span className="default-badge">System</span>}
                                     </h4>

@@ -107,8 +107,8 @@ export const FileDirectoryModal: React.FC<FileDirectoryModalProps> = ({
               onChange={(e) => {
                 if (e.target.files?.[0]) {
                   const file = e.target.files[0];
-                  if (file.size > 15 * 1024 * 1024) {
-                    alert(`File ${file.name} exceeds the 15MB limit and cannot be uploaded.`);
+                  if (file.size > 50 * 1024 * 1024) {
+                    alert(`File ${file.name} exceeds the 50MB limit and cannot be uploaded.`);
                     return;
                   }
                   const formData = new FormData();

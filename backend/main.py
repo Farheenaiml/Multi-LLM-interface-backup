@@ -15,9 +15,9 @@ import base64
 
 # Force UTF-8 encoding for standard streams to prevent Windows crash on emojis
 if isinstance(sys.stdout, io.TextIOWrapper) and sys.stdout.encoding.lower() != 'utf-8':
-    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stdout.reconfigure(encoding='utf-8')  # type: ignore
 if isinstance(sys.stderr, io.TextIOWrapper) and sys.stderr.encoding.lower() != 'utf-8':
-    sys.stderr.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')  # type: ignore
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, UploadFile, File, Form, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -181,6 +181,76 @@ async def health_check():
         return HealthResponse(status="unhealthy", service="multi-llm-broadcast-workspace")
 
 
+def process_images_for_text(images, session_id, session_file_manager_inst):
+    """Process images list, extract text from text-like files, and return tracking arrays."""
+    hydrated_images = []
+    extracted_texts = []
+    
+    if not images:
+        return hydrated_images, extracted_texts
+        
+    for img in images:
+        content_to_parse = img
+        if img.startswith("session_file:"):
+            content_to_parse = session_file_manager_inst.get_file_content(session_id, img)
+            
+        if not content_to_parse:
+            continue
+            
+        try:
+            if content_to_parse.startswith("data:"):
+                header, b64 = content_to_parse.split(",", 1)
+                mime_type = header.split(";", 1)[0].split(":", 1)[1]
+                
+                is_text = False
+                text_mimeTypes = ["text/", "application/json", "application/xml", "application/javascript", "application/csv", "application/yaml", "application/x-sh"]
+                if any(mime_type.startswith(m) for m in text_mimeTypes):
+                    try:
+                        content_bytes = base64.b64decode(b64)
+                        decoded_text = content_bytes.decode('utf-8')
+                        # Cap max file tokens approx ~100k
+                        if len(decoded_text) > 200000:
+                            decoded_text = decoded_text[:200000] + "\n\n[WARNING: File truncated due to excessive length]"
+                        extracted_texts.append(f"--- Attached Document ({mime_type}) ---\n{decoded_text}\n--- End of Document ---")
+                        is_text = True
+                    except Exception as e:
+                        logger.warning(f"Could not decode text file {mime_type}: {e}")
+                elif mime_type == "application/pdf":
+                    try:
+                        import pypdf
+                        import io
+                        content_bytes = base64.b64decode(b64)
+                        pdf_reader = pypdf.PdfReader(io.BytesIO(content_bytes))
+                        pdf_text = []
+                        for page in pdf_reader.pages:
+                            text = page.extract_text()
+                            if text:
+                                pdf_text.append(text)
+                        
+                        decoded_text = "\n\n".join(pdf_text)
+                        if len(decoded_text) > 200000:
+                            decoded_text = decoded_text[:200000] + "\n\n[WARNING: File truncated due to excessive length]"
+                            
+                        extracted_texts.append(f"--- Attached PDF Document ---\n{decoded_text}\n--- End of Document ---")
+                        is_text = True
+                    except Exception as e:
+                        logger.warning(f"Could not extract text from PDF: {e}")
+                
+                if not is_text:
+                    if not img.startswith("session_file:"):
+                        # Cache the new file
+                        content_bytes = base64.b64decode(b64)
+                        file_id = str(uuid.uuid4())
+                        session_file_manager_inst.add_file(session_id, file_id, f"auto_{file_id[:8]}", mime_type, content_bytes)
+                    hydrated_images.append(content_to_parse)
+            else:
+                hydrated_images.append(content_to_parse)
+        except Exception as e:
+            logger.error(f"Error processing inline file: {e}")
+            hydrated_images.append(content_to_parse) # Fallback
+            
+    return hydrated_images, extracted_texts
+
 
 @app.post("/broadcast", response_model=BroadcastResponse)
 async def broadcast(request: BroadcastRequest, background_tasks: BackgroundTasks):
@@ -201,6 +271,79 @@ async def broadcast(request: BroadcastRequest, background_tasks: BackgroundTasks
         session = session_manager.get_or_create_session(request.session_id)
         print(f"Session created: {session.id}")
 
+        # Handle Automatic Smart Search logic globally for the entire broadcast
+        enhanced_prompt = request.prompt
+        needs_search = False
+        search_query = enhanced_prompt
+        context_str = ""
+
+        # Explicit trigger check
+        if enhanced_prompt.strip().lower().startswith(("/search ", "/research ")):
+            needs_search = True
+            search_query = enhanced_prompt.split(" ", 1)[1]
+        else:
+            # Smart router check
+            logger.info("🧠 Checking if prompt needs web search via Smart Router...")
+            needs_search = await should_search_web(enhanced_prompt)
+
+        if needs_search:
+            logger.info(f"🔎 Web Search triggered for: {search_query}")
+            try:
+                search_data = await search_web(search_query)
+                search_results = search_data.get("results", [])
+                search_images = search_data.get("images", [])
+
+                if search_results:
+                    context_str = (
+                        "=================================================================\n"
+                        "SYSTEM DIRECTIVE: WEB RESEARCH CONTEXT\n"
+                        "=================================================================\n"
+                        "You are an AI assistant answering a query using the live internet data provided below.\n"
+                        "Please synthesize this information naturally into your response.\n"
+                        "1. You should cite sources using Markdown links: `[Source Name](URL)`.\n"
+                    )
+                    
+                    if search_images:
+                        context_str += f"2. You may optionally include this image at the top of your response if relevant: `![Context Image]({search_images[0]})`\n"
+                    else:
+                        context_str += "2. (No images available for this search)\n"
+                        
+                    context_str += "\n--- SEARCH RESULTS ---\n"
+
+                    for res in search_results:
+                        # Safety truncation: avoid raw base64 or giant HTML chunks bloating the context
+                        safe_content = res['content'][:1500] + "..." if len(res['content']) > 1500 else res['content']
+                        safe_url = res['url'][:200] + "..." if len(res['url']) > 200 else res['url']
+                        context_str += f"Title: {res['title']}\nURL: {safe_url}\nContent: {safe_content}\n\n"
+                    context_str += "=================================================================\n\n"
+                    
+                    # Ensure the entire context block doesn't exceed reasonable limits
+                    if len(context_str) > 20000:
+                        context_str = context_str[:20000] + "\n[Context Truncated for Safety]\n..."
+                        
+            except Exception as e:
+                logger.error(f"Failed to perform web search: {e}")
+        
+        # Hydrate session files globally
+        hydrated_images, extracted_text_blocks = process_images_for_text(request.images, request.session_id, session_file_manager)
+        request.images = hydrated_images
+
+        # Construct User message WITH context directly embedded to bypass model RLHF "I can't browse" refusals
+        final_user_content = enhanced_prompt
+        if extracted_text_blocks:
+            final_user_content += "\n\n" + "\n\n".join(extracted_text_blocks)
+            
+        if context_str:
+            final_user_content = f"{context_str}\n\nUSER REQUEST:\n{final_user_content}"
+
+        # Create user message
+        user_message = Message(
+            role="user", 
+            content=final_user_content,
+            images=hydrated_images if hydrated_images else None
+        )
+        print(f"Created user message with ID: {user_message.id}")
+
         pane_ids = []
         user_message_ids = {}
         for model_selection in request.models:
@@ -210,84 +353,8 @@ async def broadcast(request: BroadcastRequest, background_tasks: BackgroundTasks
             print(f"Model info: {model_info}")
 
             if model_info:
-                # Handle Automatic Smart Search logic
-                enhanced_prompt = request.prompt
-                needs_search = False
-                search_query = enhanced_prompt
-
-                # Explicit trigger check
-                if enhanced_prompt.strip().lower().startswith(("/search ", "/research ")):
-                    needs_search = True
-                    search_query = enhanced_prompt.split(" ", 1)[1]
-                else:
-                    # Smart router check
-                    logger.info("🧠 Checking if prompt needs web search via Smart Router...")
-                    needs_search = await should_search_web(enhanced_prompt)
-
-                if needs_search:
-                    logger.info(f"🔎 Web Search triggered for: {search_query}")
-                    try:
-                        search_data = await search_web(search_query)
-                        search_results = search_data.get("results", [])
-                        search_images = search_data.get("images", [])
-
-                        if search_results:
-                            context_str = (
-                                "=================================================================\n"
-                                "SYSTEM DIRECTIVE: WEB RESEARCH CONTEXT\n"
-                                "=================================================================\n"
-                                "You are an AI assistant answering a query using the live internet data provided below.\n"
-                                "Please synthesize this information naturally into your response.\n"
-                                "1. You should cite sources using Markdown links: `[Source Name](URL)`.\n"
-                            )
-                            
-                            if search_images:
-                                context_str += f"2. You may optionally include this image at the top of your response if relevant: `![Context Image]({search_images[0]})`\n"
-                            else:
-                                context_str += "2. (No images available for this search)\n"
-                                
-                            context_str += "\n--- SEARCH RESULTS ---\n"
-
-                            for res in search_results:
-                                context_str += f"Title: {res['title']}\nURL: {res['url']}\nContent: {res['content']}\n\n"
-                            context_str += "=================================================================\n\n"
-                            
-                    except Exception as e:
-                        logger.error(f"Failed to perform web search: {e}")
                 
-                # Hydrate session files
-                hydrated_images = []
-                if request.images:
-                    for img in request.images:
-                        if img.startswith("session_file:"):
-                            content = session_file_manager.get_file_content(request.session_id, img)
-                            if content:
-                                hydrated_images.append(content)
-                        else:
-                            try:
-                                if img.startswith("data:"):
-                                    header, b64 = img.split(",", 1)
-                                    mime_type = header.split(";", 1)[0].split(":", 1)[1]
-                                    content_bytes = base64.b64decode(b64)
-                                    file_id = str(uuid.uuid4())
-                                    # Cache the new file
-                                    session_file_manager.add_file(request.session_id, file_id, f"auto_{file_id[:8]}", mime_type, content_bytes)
-                            except Exception as e:
-                                logger.error(f"Error auto-caching inline file: {e}")
-                            hydrated_images.append(img)
-
-                # Create user message
-                user_message = Message(
-                    role="user", 
-                    content=enhanced_prompt,
-                    images=hydrated_images if request.images else None
-                )
-                print(f"Created user message with ID: {user_message.id}")
-                
-                messages_list = []
-                if needs_search and 'context_str' in locals() and context_str:
-                    messages_list.append(Message(role="system", content=context_str))
-                messages_list.append(user_message)
+                messages_list = [user_message]
 
                 pane = ChatPane(
                     model_info=model_info,
@@ -346,26 +413,8 @@ async def send_chat_message(pane_id: str, request: dict, background_tasks: Backg
         logger.info(f"🔍 CHAT REQUEST DEBUG: Model ID: {pane.model_info.id} (Provider: {pane.model_info.provider})")
         images = request.get("images")
         
-        hydrated_images = []
-        if images:
-            for img in images:
-                if img.startswith("session_file:"):
-                    content = session_file_manager.get_file_content(session_id, img)
-                    if content:
-                        hydrated_images.append(content)
-                else:
-                    try:
-                        if img.startswith("data:"):
-                            header, b64 = img.split(",", 1)
-                            mime_type = header.split(";", 1)[0].split(":", 1)[1]
-                            content_bytes = base64.b64decode(b64)
-                            file_id = str(uuid.uuid4())
-                            # Cache the new file
-                            session_file_manager.add_file(session_id, file_id, f"auto_{file_id[:8]}", mime_type, content_bytes)
-                    except Exception as e:
-                        logger.error(f"Error auto-caching inline file: {e}")
-                    hydrated_images.append(img)
-            images = hydrated_images
+        hydrated_images, extracted_text_blocks = process_images_for_text(images, session_id, session_file_manager)
+        images = hydrated_images
 
         if images:
             logger.info(f"🔍 CHAT REQUEST DEBUG: Received {len(images)} images")
@@ -408,20 +457,31 @@ async def send_chat_message(pane_id: str, request: dict, background_tasks: Backg
                     context_str += "\n--- SEARCH RESULTS ---\n"
 
                     for res in search_results:
-                        context_str += f"Title: {res['title']}\nURL: {res['url']}\nContent: {res['content']}\n\n"
+                        # Safety truncation: avoid raw base64 or giant HTML chunks bloating the context
+                        safe_content = res['content'][:1500] + "..." if len(res['content']) > 1500 else res['content']
+                        safe_url = res['url'][:200] + "..." if len(res['url']) > 200 else res['url']
+                        context_str += f"Title: {res['title']}\nURL: {safe_url}\nContent: {safe_content}\n\n"
                     context_str += "=================================================================\n\n"
                     
+                    # Ensure the entire context block doesn't exceed reasonable limits (e.g. 20,000 characters)
+                    if len(context_str) > 20000:
+                        context_str = context_str[:20000] + "\n[Context Truncated for Safety]\n..."
+                        
                     logger.info(f"✅ Web research injected as system context (length: {len(context_str)})")
             except Exception as e:
                 logger.error(f"Failed to perform web search: {e}")
 
         # Add messages to pane
-        if needs_search and 'context_str' in locals() and context_str:
-            pane.messages.append(Message(role="system", content=context_str))
+        final_user_content = enhanced_message
+        if extracted_text_blocks:
+            final_user_content += "\n\n" + "\n\n".join(extracted_text_blocks)
+            
+        if needs_search and locals().get('context_str'):
+            final_user_content = f"{locals().get('context_str')}\n\nUSER REQUEST:\n{final_user_content}"
             
         user_message = Message(
             role="user", 
-            content=enhanced_message,
+            content=final_user_content,
             images=images
         )
         pane.messages.append(user_message)
@@ -548,9 +608,9 @@ async def send_to_pane(request: SendToRequest):
                     max_tokens=500
                 ):
                     if event.type == "token":
-                        summary_content += event.data.token
+                        summary_content += event.data.token  # type: ignore
                     elif event.type == "final":
-                        summary_content = event.data.content
+                        summary_content = event.data.content  # type: ignore
                         break
 
                 if not summary_content.strip():
@@ -649,8 +709,7 @@ async def generate_summary(request: SummaryRequest):
             raise HTTPException(status_code=503, detail="No summarization model available")
 
         summary_pane = ChatPane(
-            model_info=await registry.get_model_info("litellm:gpt-3.5-turbo") or
-                      (await registry.discover_models()).get("litellm", [{}])[0],
+            model_info=await registry.get_model_info("litellm:gpt-3.5-turbo") or (await registry.discover_models()).get("litellm", [{}])[0],  # type: ignore
             messages=[]
         )
 
@@ -676,7 +735,7 @@ async def upload_session_file(session_id: str, file: UploadFile = File(...)):
         content = await file.read()
         file_id = str(uuid.uuid4())
         mime_type = file.content_type or "application/octet-stream"
-        file_info = session_file_manager.add_file(session_id, file_id, file.filename, mime_type, content)
+        file_info = session_file_manager.add_file(session_id, file_id, file.filename or "unnamed_file", mime_type, content)
         return file_info
     except ValueError as e:
         logger.error(f"Upload error: {e}")

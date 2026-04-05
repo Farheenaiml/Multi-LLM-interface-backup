@@ -78,39 +78,37 @@ async def should_search_web(prompt: str) -> bool:
         "Return EXACTLY 'false' if it is a general coding question, greeting, translation, creative writing, dictionary definition (like 'what is velocity'), or relies entirely on general or encyclopedic knowledge."
     )
     
-    # Try Groq first for speed
-    adapter = registry.get_adapter("groq")
-    model_id = "llama-3.1-8b-instant"
-    
-    if not adapter:
-        # Fallback to Google
-        adapter = registry.get_adapter("google")
-        model_id = "gemini-flash-latest"
-        
-    if not adapter:
-        print("Warning: Neither Groq nor Google adapters configured for Smart Router. Defaulting to False.")
-        return False
-        
     messages = [
         Message(role="system", content=system_instruction),
         Message(role="user", content=prompt)
     ]
     
-    try:
+    async def try_router(current_adapter, current_model_id):
+        if not current_adapter:
+            return None
         output = ""
-        # stream the response
-        async for event in adapter.stream(messages, model_id, "router_pane", temperature=0.0, max_tokens=20):
-            if event.type == "token":
-                output += event.data.token
-            elif event.type == "final":
-                output = event.data.content
-                break
-            elif event.type == "error":
-                raise Exception(event.data.message)
+        try:
+            async for event in current_adapter.stream(messages, current_model_id, "router_pane", temperature=0.0, max_tokens=20):
+                if event.type == "token":
+                    output += event.data.token
+                elif event.type == "final":
+                    output = event.data.content
+                    break
+                elif event.type == "error":
+                    raise Exception(event.data.message)
+            return output
+        except Exception as e:
+            print(f"Smart router try_router failed with {current_model_id}: {e}")
+            return None
+            
+    # Try Groq first for speed
+    output = await try_router(registry.get_adapter("groq"), "llama-3.1-8b-instant")
+    
+    if output is None:
+        # Fallback to Google
+        print("Smart router falling back to Google adapter...")
+        output = await try_router(registry.get_adapter("google"), "gemini-flash-latest")
         
-        if "true" in output.lower():
-            return True
-        return False
-    except Exception as e:
-        print(f"Smart router failed: {e}")
-        return False
+    if output and "true" in output.lower():
+        return True
+    return False

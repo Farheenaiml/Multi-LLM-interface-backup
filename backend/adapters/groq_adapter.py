@@ -13,8 +13,8 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models import Message, ModelInfo, StreamEvent, TokenData, FinalData, MeterData, ErrorData, StatusData
-from error_handler import error_handler
+from models import Message, ModelInfo, StreamEvent, TokenData, FinalData, MeterData, ErrorData, StatusData  # type: ignore
+from error_handler import error_handler  # type: ignore
 
 
 class GroqAdapter(LLMAdapter):
@@ -31,10 +31,10 @@ class GroqAdapter(LLMAdapter):
         self.base_url = self.config.get("base_url", "https://api.groq.com/openai/v1")
         # Enhanced timeout configuration for Groq's fast inference
         timeout_config = httpx.Timeout(
-            connect=10.0,  # Connection timeout
-            read=45.0,     # Read timeout (Groq is typically faster)
-            write=10.0,    # Write timeout
-            pool=5.0       # Pool timeout
+            connect=15.0,  # Connection timeout
+            read=300.0,    # Read timeout
+            write=60.0,    # Write timeout
+            pool=None      # Pool timeout
         )
         self.client = httpx.AsyncClient(timeout=timeout_config)
     
@@ -96,7 +96,7 @@ class GroqAdapter(LLMAdapter):
             token_count = 0
             full_content = ""
             
-            max_retries = 3
+            max_retries = 5
             for attempt in range(max_retries):
                 async with self.client.stream(
                     "POST",
@@ -105,10 +105,22 @@ class GroqAdapter(LLMAdapter):
                     headers=headers
                 ) as response:
                     
-                    if response.status_code == 503 and attempt < max_retries - 1:
+                    if response.status_code in [503, 429] and attempt < max_retries - 1:
                         import asyncio
-                        wait_time = (attempt + 1) * 2
-                        print(f"Groq API {response.status_code} on attempt {attempt+1}. Retrying in {wait_time}s...")
+                        import random
+                        
+                        # Read Retry-After header if present
+                        retry_after_str = response.headers.get("retry-after")
+                        if retry_after_str and retry_after_str.isdigit():
+                            wait_time = float(retry_after_str)
+                        else:
+                            # Exponential backoff: 2, 4, 8, 16...
+                            base_wait = 2 
+                            wait_time = (2 ** attempt) * base_wait
+                            wait_time += random.uniform(0.1, 1.0)
+                            
+                        wait_time = min(wait_time, 60.0)
+                        print(f"Groq API {response.status_code} on attempt {attempt+1}. Retrying in {wait_time:.2f}s...")
                         await asyncio.sleep(wait_time)
                         continue
                         

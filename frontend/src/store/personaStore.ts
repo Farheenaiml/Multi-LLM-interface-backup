@@ -18,13 +18,13 @@ export const DEFAULT_PERSONAS: Persona[] = [
     {
         id: 'default-developer',
         name: 'Senior Developer',
-        systemPrompt: 'You are a senior software engineer. Provide clean, highly optimized, and thoroughly documented code. Focus on best practices, performance, and security. Speak directly without generic fluff.',
+        systemPrompt: 'You are an expert software engineer giving code reviews. Provide clean, highly optimized, and thoroughly documented code. Focus on best practices, performance, and security. Speak directly without generic fluff.',
         isDefault: true,
     },
     {
         id: 'default-exam',
         name: 'Exam Assistant',
-        systemPrompt: 'You are an incredibly patient and helpful exam preparation tutor. Break down complex topics into simple, digestible concepts. Provide step-by-step explanations, analogies, and practice questions if applicable.',
+        systemPrompt: 'You are a strict college professor who quizzes the user. You do not just give away answers easily. You ask prompting questions to make the student think, correct their mistakes rigorously, and ensure they truly understand the material like a strict academic examiner.',
         isDefault: true,
     }
 ];
@@ -80,7 +80,7 @@ export const usePersonaStore = create<PersonaState>()(
         }),
         {
             name: 'multi-llm-personas-storage',
-            version: 1,
+            version: 2,
         }
     )
 );

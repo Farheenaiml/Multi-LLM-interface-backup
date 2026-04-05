@@ -31,10 +31,10 @@ class LiteLLMAdapter(LLMAdapter):
         self.master_key = self.config.get("master_key", "sk-1234")
         # Enhanced timeout configuration
         timeout_config = httpx.Timeout(
-            connect=10.0,  # Connection timeout
-            read=60.0,     # Read timeout for streaming
-            write=10.0,    # Write timeout
-            pool=5.0       # Pool timeout
+            connect=30.0,  # Connection timeout
+            read=180.0,    # Read timeout for streaming
+            write=120.0,   # Write timeout
+            pool=10.0      # Pool timeout
         )
         self.client = httpx.AsyncClient(timeout=timeout_config)
     

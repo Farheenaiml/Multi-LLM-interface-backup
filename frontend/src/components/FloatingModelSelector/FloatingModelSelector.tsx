@@ -77,8 +77,8 @@ export const FloatingModelSelector: React.FC<FloatingModelSelectorProps> = ({
     if (e.target.files && currentSession) {
       const files = Array.from(e.target.files);
       for (const file of files) {
-        if (file.size > 15 * 1024 * 1024) {
-          alert(`File ${file.name} exceeds the 15MB limit and will not be uploaded.`);
+        if (file.size > 50 * 1024 * 1024) {
+          alert(`File ${file.name} exceeds the 50MB limit and will not be uploaded.`);
           continue;
         }
         const formData = new FormData();

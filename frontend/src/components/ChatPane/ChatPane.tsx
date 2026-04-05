@@ -342,7 +342,7 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
               onChange={(e) => updatePanePersona(pane.id, e.target.value === 'global' ? undefined : e.target.value)}
               className="local-persona-select"
             >
-              <option value="global">🌍 Global Persona</option>
+              <option value="global">🌍 No Persona (Default AI)</option>
               {personas.map(p => (
                 <option key={p.id} value={p.id}>🎭 {p.name}</option>
               ))}

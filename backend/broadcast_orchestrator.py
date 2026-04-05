@@ -228,33 +228,28 @@ class BroadcastOrchestrator:
             persona_prompt = getattr(request, 'system_prompt', None)
             
             # KNOWLEDGE VAULT: Inject global facts into system prompt
-            # If the user selected the Global Persona (no custom persona prompt), we completely disable the Knowledge Vault
-            # so the model cannot possibly hallucinate the user's professional traits.
-            vault_context = knowledge_manager.get_knowledge_context() if persona_prompt else ""
+            # We always inject knowledge vault so the AI knows who the user is.
+            vault_context = knowledge_manager.get_knowledge_context()
             
-            if vault_context:
-                # Insert right after any LONG-TERM MEMORY system message, or at index 0
-                if messages and messages[0].role == "system" and "LONG-TERM MEMORY SUMMARY" in messages[0].content:
-                    messages.insert(1, Message(role="system", content=vault_context))
-                else:
-                    messages.insert(0, Message(role="system", content=vault_context))
-                    
             # EXTRACT SYSTEM AND NON-SYSTEM MESSAGES
             system_contents = []
             non_system_messages = []
             
             for msg in messages:
                 if msg.role == "system":
-                    # Don't include old persona instructions to avoid confusion mid-chat
-                    if "CURRENT ACTIVE PERSONA" not in msg.content:
+                    # Don't include old persona instructions or knowledge vaults to avoid confusion mid-chat
+                    if "CURRENT ACTIVE PERSONA" not in msg.content and "SYSTEM METADATA: USER PROFILE REFERENCE" not in msg.content and "LONG-TERM MEMORY SUMMARY" not in msg.content:
                         system_contents.append(msg.content)
                 else:
                     non_system_messages.append(msg)
+            
+            # Append the up-to-date Knowledge Vault if it exists
+            if vault_context:
+                system_contents.append(vault_context)
                     
-            # PERSONA INJECTION
             persona_prompt = getattr(request, 'system_prompt', None)
             if not persona_prompt:
-                persona_prompt = "You are a helpful, objective, and general-purpose AI assistant. Provide clear, direct, and factual answers without adopting any specific professional or human persona."
+                persona_prompt = "You are ChatGPT (a helpful, normal robot). Provide clear, direct, and factual answers without adopting any specific professional or human persona. You are the AI Assistant. The user is a separate human."
                 
             persona_block = (
                 "=================================================================\n"
@@ -265,21 +260,31 @@ class BroadcastOrchestrator:
                 "================================================================="
             )
             
-            # Append persona block at the very end of all system contexts so it has the highest precedence
-            system_contents.append(persona_block)
-                    
             # CONSOLIDATE SYSTEM MESSAGES: Stricter models crash if multiple system prompts exist
-            messages = []
+            final_messages = []
             if system_contents:
                 combined_system_prompt = "\n\n---\n\n".join(system_contents)
-                messages.append(Message(role="system", content=combined_system_prompt))
+                final_messages.append(Message(role="system", content=combined_system_prompt))
                 
-            messages.extend(non_system_messages)
+            final_messages.extend(non_system_messages)
+            
+            # INJECT PERSONA BLOCK INTO LATEST USER MESSAGE
+            # To overpower autoregressive history lock-in during mid-chat switching,
+            # we force the persona instructions at the absolute bottom of the context stack
+            if final_messages and final_messages[-1].role == 'user':
+                original_content = final_messages[-1].content
+                final_messages[-1].content = f"{persona_block}\n\n[USER REQUEST]\n{original_content}"
+            else:
+                # Fallback if somehow there's no user message at the end
+                final_messages.append(Message(role="system", content=persona_block))
                     
             # Log conversation context for debugging
-            logger.info(f"🗨️ Sending {len(messages)} messages to {model_id} (pane: {pane_id})")
-            for i, msg in enumerate(messages):
+            logger.info(f"🗨️ Sending {len(final_messages)} messages to {model_id} (pane: {pane_id})")
+            for i, msg in enumerate(final_messages):
                 logger.info(f"  [{i}] {msg.role}: {msg.content[:50]}{'...' if len(msg.content) > 50 else ''}")
+            
+            # For the actual API call we use final_messages
+            messages = final_messages
             
             # Stream parameters
             stream_params = {
@@ -391,20 +396,23 @@ class BroadcastOrchestrator:
                             logger.warning("Vision Bridge: Gemini returned empty description")
                 except Exception as e:
                     logger.error(f"Vision Bridge Error: {str(e)}", exc_info=True)
-                    # Notify user of hard failure with the exact API error
+                    # Notify user of failure but allow the target AI to respond gracefully
                     await connection_manager.send_event(
                         request.session_id,
                         StreamEvent(
-                            type="error",
+                            type="status",
                             pane_id=pane_id,
-                            data=ErrorData(
-                                message=f"Vision Bridge Error: {str(e)}",
-                                code="api_error",
-                                retryable=True
+                            data=StatusData(
+                                status="ready",
+                                message=f"Document analysis failed: {str(e)[:50]}. AI will respond without context."
                             )
                         )
                     )
-                    return # Stop executing Groq if Vision Bridge fails
+                    
+                    if messages:
+                        last_msg = messages[-1]
+                        last_msg.content += f"\n\n[SYSTEM NOTE: The user attached a file, but the text extraction/vision analysis service failed with error: '{str(e)}'. The AI cannot see the contents of the attached file. Acknowledge this error gracefully to the user and answer the rest of their prompt if possible.]"
+                        last_msg.images = None # Remove images so target adapter doesn't choke
             # ---------------------------
             
             error_handler._log_structured(

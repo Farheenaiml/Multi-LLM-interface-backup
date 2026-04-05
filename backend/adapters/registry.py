@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Type, Any
 from .base import LLMAdapter
 from .google_adapter import GoogleDataStudioAdapter
 from .groq_adapter import GroqAdapter
+from .litellm_adapter import LiteLLMAdapter
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -36,6 +37,7 @@ class AdapterRegistry:
         """Register default adapters."""
         self.register("google", GoogleDataStudioAdapter)
         self.register("groq", GroqAdapter)
+        self.register("litellm", LiteLLMAdapter)
     
     def register(self, provider_name: str, adapter_class: Type[LLMAdapter]):
         """

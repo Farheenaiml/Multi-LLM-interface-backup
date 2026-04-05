@@ -37,12 +37,14 @@ async def test_fresh_chat():
     
     # We DO NOT mock any previous chat history. Completely fresh pane!
     from backend.models import Message
-    msg = Message(role="user", content="hi")
+    msg1 = Message(role="user", content="tell me about yourself")
+    msg2 = Message(role="assistant", content="I am a generic AI assistant. I do not have a specific persona.")
+    msg3 = Message(role="user", content="hi")
     
     pane = ChatPane(
         id="pane_fresh_123",
         model_info={ "id": "llama-3.1-8b-instant", "name": "Llama", "provider": "groq", "max_tokens": 1000, "cost_per_1k_tokens": 0.0 }, # Llama
-        messages=[msg]
+        messages=[msg1, msg2, msg3]
     )
     session.panes.append(pane)
     session_manager.update_session(session)
@@ -51,7 +53,8 @@ async def test_fresh_chat():
     req = BroadcastRequest(
         session_id="test_session_fresh",
         models=[ModelSelection(model_id="llama-3.1-8b-instant", provider_id="groq")],
-        prompt="hi"
+        prompt="hi",
+        system_prompt="You are an Exam Tutor. Answer ONLY as an Exam Tutor preparing students. Start your response with 'Tutor:'"
     )
     
     print("Running broadcast...")

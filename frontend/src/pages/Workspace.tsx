@@ -122,7 +122,7 @@ export const Workspace: React.FC = () => {
 
     try {
       const personaStore = usePersonaStore.getState();
-      const activePersonaId = pane.personaId || personaStore.globalPersonaId;
+      const activePersonaId = pane.personaId; // No fallback
       const activePersona = personaStore.personas.find(p => p.id === activePersonaId);
       const systemPrompt = activePersona ? activePersona.systemPrompt : undefined;
 
@@ -260,6 +260,11 @@ export const Workspace: React.FC = () => {
         }
 
         try {
+          const personaStore = usePersonaStore.getState();
+          const activePersonaId = pane.personaId; // No fallback
+          const activePersona = personaStore.personas.find(p => p.id === activePersonaId);
+          const systemPrompt = activePersona ? activePersona.systemPrompt : undefined;
+
           const response = await fetch(`${apiService['baseUrl']}/chat/${paneId}`, {
             method: 'POST',
             headers: {
@@ -267,7 +272,8 @@ export const Workspace: React.FC = () => {
             },
             body: JSON.stringify({
               session_id: currentSession.id,
-              message: prompt
+              message: prompt,
+              system_prompt: systemPrompt
             })
           });
 

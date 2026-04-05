@@ -31,7 +31,7 @@ class LLMAdapter(ABC):
         self.config = config or {}
     
     @abstractmethod
-    async def stream(
+    def stream(
         self, 
         messages: List[Message], 
         model: str,

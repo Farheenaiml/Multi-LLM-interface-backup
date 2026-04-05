@@ -318,8 +318,8 @@ class SessionFileManager:
     def __init__(self, storage_dir=".session_files"):
         self.storage_dir = storage_dir
         os.makedirs(self.storage_dir, exist_ok=True)
-        self.MAX_FILE_SIZE = 15 * 1024 * 1024 # 15 MB
-        self.MAX_SESSION_SIZE = 50 * 1024 * 1024 * 1024 # 50 GB
+        self.MAX_FILE_SIZE = 50 * 1024 * 1024 # 50 MB
+        self.MAX_SESSION_SIZE = 50 * 1024 * 1024 # 50 MB
     
     def _get_session_dir(self, session_id: str) -> str:
         d = os.path.join(self.storage_dir, session_id)
@@ -363,11 +363,11 @@ class SessionFileManager:
     def add_file(self, session_id: str, file_id: str, name: str, mime_type: str, content: bytes) -> dict:
         size = len(content)
         if size > self.MAX_FILE_SIZE:
-            raise ValueError(f"File {name} exceeds the 15MB limit")
+            raise ValueError(f"File {name} exceeds the 50MB limit")
             
-        current_len = self._get_overall_storage_size()
+        current_len = self._get_session_size(session_id)
         if current_len + size > self.MAX_SESSION_SIZE:
-            raise ValueError("Overall limit of 50GB exceeded for file uploading")
+            raise ValueError(f"Session limit of 50MB exceeded! Current session size: {current_len//(1024*1024)}MB. Delete old files to upload more.")
             
         d = self._get_session_dir(session_id)
         
